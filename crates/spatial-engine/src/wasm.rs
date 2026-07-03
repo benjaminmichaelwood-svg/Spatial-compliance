@@ -1,5 +1,6 @@
 use wasm_bindgen::prelude::*;
 
+use crate::classify::{classify_conformance, ConformanceInput, Mode};
 use crate::cutfill::{compute_cut_fill, SliverFilter};
 use crate::format::{decode_surfaces, encode_surfaces};
 use crate::types::TriSurface;
@@ -69,5 +70,92 @@ pub fn run_cut_fill_from_json(
 
     let result = compute_cut_fill(&a, &b, resolution as usize, filter);
 
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn run_conformance(
+    production_start_json: &str,
+    production_end_json: &str,
+    schedule_start_json: &str,
+    schedule_end_json: &str,
+    schedule_future_json: &str,
+    mode: &str,
+    resolution: u32,
+    min_volume: f64,
+    min_thickness: f64,
+) -> Result<JsValue, JsValue> {
+    let ps: TriSurface =
+        serde_json::from_str(production_start_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let pe: TriSurface =
+        serde_json::from_str(production_end_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let ss: TriSurface =
+        serde_json::from_str(schedule_start_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let se: TriSurface =
+        serde_json::from_str(schedule_end_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let sf: TriSurface =
+        serde_json::from_str(schedule_future_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let mode = match mode {
+        "dig" => Mode::Dig,
+        "dump" => Mode::Dump,
+        _ => return Err(JsValue::from_str("mode must be 'dig' or 'dump'")),
+    };
+
+    let input = ConformanceInput {
+        production_start: &ps,
+        production_end: &pe,
+        schedule_start: &ss,
+        schedule_end: &se,
+        schedule_future: &sf,
+        mode,
+        resolution: resolution as usize,
+        filter: SliverFilter {
+            min_volume_m3: min_volume,
+            min_thickness_m: min_thickness,
+        },
+    };
+
+    let result = classify_conformance(&input);
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn run_conformance_from_binary(
+    data: &[u8],
+    mode: &str,
+    resolution: u32,
+    min_volume: f64,
+    min_thickness: f64,
+) -> Result<JsValue, JsValue> {
+    let surfaces = decode_surfaces(data).map_err(|e| JsValue::from_str(&e))?;
+
+    if surfaces.len() < 5 {
+        return Err(JsValue::from_str(
+            "Need at least 5 surfaces: Production Start, Production End, Schedule Start, Schedule End, Schedule Future",
+        ));
+    }
+
+    let mode = match mode {
+        "dig" => Mode::Dig,
+        "dump" => Mode::Dump,
+        _ => return Err(JsValue::from_str("mode must be 'dig' or 'dump'")),
+    };
+
+    let input = ConformanceInput {
+        production_start: &surfaces[0],
+        production_end: &surfaces[1],
+        schedule_start: &surfaces[2],
+        schedule_end: &surfaces[3],
+        schedule_future: &surfaces[4],
+        mode,
+        resolution: resolution as usize,
+        filter: SliverFilter {
+            min_volume_m3: min_volume,
+            min_thickness_m: min_thickness,
+        },
+    };
+
+    let result = classify_conformance(&input);
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
