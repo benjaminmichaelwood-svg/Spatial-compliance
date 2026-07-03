@@ -2,3 +2,5 @@ node_modules/
 dist/
 .vite/
 *.local
+target/
+crates/spatial-engine/pkg/
