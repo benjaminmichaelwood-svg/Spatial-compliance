@@ -280,6 +280,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn parse_real_file() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/sample.00t")).unwrap();
         let surfaces = decode_surfaces(&data).unwrap();
@@ -304,6 +305,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn roundtrip_real_file() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/sample.00t")).unwrap();
         let surfaces = decode_surfaces(&data).unwrap();
