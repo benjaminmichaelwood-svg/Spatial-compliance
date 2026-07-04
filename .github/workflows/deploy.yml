@@ -33,14 +33,14 @@ jobs:
         run: cargo test --lib
 
       - name: Build WASM
-        run: wasm-pack build --target web --out-dir ../../web/pkg crates/spatial-engine
+        run: wasm-pack build --target web crates/spatial-engine
 
       - name: Copy WASM binary
-        run: cp web/pkg/spatial_engine_bg.wasm web/public/spatial_engine_bg.wasm
+        run: cp crates/spatial-engine/pkg/spatial_engine_bg.wasm web/public/spatial_engine_bg.wasm
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
 
