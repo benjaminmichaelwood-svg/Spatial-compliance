@@ -241,3 +241,10 @@ pub fn extract_boundary_from_surface_json(surface_json: &str) -> Result<JsValue,
 
     serde_wasm_bindgen::to_value(&region).map_err(|e| JsValue::from_str(&e.to_string()))
 }
+
+#[wasm_bindgen]
+pub fn encode_surfaces_from_json(surfaces_json: &str) -> Result<Vec<u8>, JsValue> {
+    let surfaces: Vec<TriSurface> =
+        serde_json::from_str(surfaces_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(encode_surfaces(&surfaces))
+}

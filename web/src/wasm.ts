@@ -70,3 +70,9 @@ export function extractBoundaryFromSurfaceJson(surface: TriSurface): BoundaryReg
     JSON.stringify(surface),
   ) as BoundaryRegion;
 }
+
+export function encodeSurfaces(surfaces: TriSurface[]): Uint8Array {
+  return wasmModule.encode_surfaces_from_json(
+    JSON.stringify(surfaces),
+  ) as Uint8Array;
+}

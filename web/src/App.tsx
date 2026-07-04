@@ -17,6 +17,7 @@ import SettingsPanel from './components/SettingsPanel';
 import BoundaryPanel from './components/BoundaryPanel';
 import LayerPanel from './components/LayerPanel';
 import Viewer from './components/Viewer';
+import ReportPanel from './components/report/ReportPanel';
 
 function makeFlatSurface(z: number, name: string, size = 20): TriSurface {
   const vertices: Vec3[] = [
@@ -27,6 +28,8 @@ function makeFlatSurface(z: number, name: string, size = 20): TriSurface {
   ];
   return { name, vertices, indices: [[0, 1, 2], [0, 2, 3]] };
 }
+
+type MainTab = 'viewer' | 'reports';
 
 export default function App() {
   const [wasmReady, setWasmReady] = useState(false);
@@ -42,6 +45,7 @@ export default function App() {
   const [boundaries, setBoundaries] = useState<BoundaryRegion[]>([]);
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawPoints, setDrawPoints] = useState<[number, number][]>([]);
+  const [mainTab, setMainTab] = useState<MainTab>('viewer');
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -214,6 +218,7 @@ export default function App() {
               setResult(null);
               setUploads(new Map());
               setBoundaries([]);
+              setMainTab('viewer');
             }}
             className="text-sm text-slate-400 transition-colors hover:text-slate-600"
           >
@@ -232,20 +237,22 @@ export default function App() {
             {mode}
           </span>
         </div>
-        {result && (
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-400">
-              {result.domains.length} solids
-            </span>
-            <button type="button" onClick={handleCapture} className="btn-secondary !py-1.5 !text-xs">
-              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-              Capture View
-            </button>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {result && (
+            <>
+              <span className="text-xs text-slate-400">
+                {result.domains.length} solids
+              </span>
+              <button type="button" onClick={handleCapture} className="btn-secondary !py-1.5 !text-xs">
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Capture View
+              </button>
+            </>
+          )}
+        </div>
       </header>
 
       {/* Body */}
@@ -302,8 +309,44 @@ export default function App() {
             )}
           </div>
 
-          {/* Layers */}
+          {/* Tab switcher */}
           {result && (
+            <div className="sidebar-section">
+              <div className="flex rounded-lg bg-slate-800/50 p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setMainTab('viewer')}
+                  className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                    mainTab === 'viewer'
+                      ? 'bg-indigo-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <svg className="mr-1.5 inline h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-2.25-1.313M21 7.5v2.25m0-2.25l-2.25 1.313M3 7.5l2.25-1.313M3 7.5l2.25 1.313M3 7.5v2.25m9 3l2.25-1.313M12 12.75l-2.25-1.313M12 12.75V15" />
+                  </svg>
+                  3D View
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMainTab('reports')}
+                  className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                    mainTab === 'reports'
+                      ? 'bg-indigo-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <svg className="mr-1.5 inline h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Reports
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Layers (only in viewer tab) */}
+          {result && mainTab === 'viewer' && (
             <LayerPanel
               result={result}
               visible={visible}
@@ -315,15 +358,25 @@ export default function App() {
         {/* Main content */}
         <main className="flex-1 overflow-hidden">
           {result ? (
-            <Viewer
-              result={result}
-              visible={visible}
-              canvasRef={canvasRef}
-              boundaries={boundaries}
-              isDrawing={isDrawing}
-              drawPoints={drawPoints}
-              onAddDrawPoint={handleAddDrawPoint}
-            />
+            mainTab === 'reports' ? (
+              <ReportPanel
+                result={result}
+                mode={mode}
+                boundaries={boundaries}
+                comparisonName={comparisonName}
+                canvasRef={canvasRef}
+              />
+            ) : (
+              <Viewer
+                result={result}
+                visible={visible}
+                canvasRef={canvasRef}
+                boundaries={boundaries}
+                isDrawing={isDrawing}
+                drawPoints={drawPoints}
+                onAddDrawPoint={handleAddDrawPoint}
+              />
+            )
           ) : (
             <div className="flex h-full items-center justify-center bg-slate-50">
               <div className="text-center">
