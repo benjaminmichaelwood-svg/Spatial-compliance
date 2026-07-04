@@ -46,6 +46,7 @@ export default function App() {
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawPoints, setDrawPoints] = useState<[number, number][]>([]);
   const [mainTab, setMainTab] = useState<MainTab>('viewer');
+  const [surfaceVisible, setSurfaceVisible] = useState<Set<SurfaceRole>>(new Set());
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -187,6 +188,15 @@ export default function App() {
       const next = new Set(prev);
       if (next.has(domain)) next.delete(domain);
       else next.add(domain);
+      return next;
+    });
+  }, []);
+
+  const handleToggleSurface = useCallback((role: SurfaceRole) => {
+    setSurfaceVisible((prev) => {
+      const next = new Set(prev);
+      if (next.has(role)) next.delete(role);
+      else next.add(role);
       return next;
     });
   }, []);
@@ -351,6 +361,9 @@ export default function App() {
               result={result}
               visible={visible}
               onToggle={handleToggle}
+              uploads={uploads}
+              surfaceVisible={surfaceVisible}
+              onToggleSurface={handleToggleSurface}
             />
           )}
         </aside>
@@ -375,6 +388,8 @@ export default function App() {
                 isDrawing={isDrawing}
                 drawPoints={drawPoints}
                 onAddDrawPoint={handleAddDrawPoint}
+                uploads={uploads}
+                surfaceVisible={surfaceVisible}
               />
             )
           ) : (

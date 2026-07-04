@@ -2,7 +2,8 @@ import { useRef, useMemo, useEffect, useCallback, useState } from 'react';
 import { Canvas, useThree, type CanvasProps } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Line } from '@react-three/drei';
 import * as THREE from 'three';
-import type { BoundaryRegion, ConformanceResult, DomainSolid } from '../types';
+import type { BoundaryRegion, ConformanceResult, DomainSolid, SurfaceRole, UploadedSurface } from '../types';
+import { SURFACE_ROLES } from '../types';
 
 interface DomainMeshProps {
   solid: DomainSolid;
@@ -16,6 +17,88 @@ interface TooltipInfo {
   domain: string;
   volume: number;
   blockName?: string;
+  surfaceFileName?: string;
+  surfaceRoleLabel?: string;
+}
+
+const SURFACE_COLORS: Record<SurfaceRole, string> = {
+  production_start: '#94a3b8',
+  production_end: '#64748b',
+  schedule_start: '#7dd3fc',
+  schedule_end: '#38bdf8',
+  schedule_future: '#a78bfa',
+};
+
+interface SurfaceMeshProps {
+  upload: UploadedSurface;
+  onHover: (info: TooltipInfo | null) => void;
+}
+
+function SurfaceMesh({ upload, onHover }: SurfaceMeshProps) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const geometry = useMemo(() => {
+    const verts = upload.surface.vertices;
+    const idxs = upload.surface.indices;
+    const positions = new Float32Array(verts.length * 3);
+    for (let i = 0; i < verts.length; i++) {
+      positions[i * 3] = verts[i].x;
+      positions[i * 3 + 1] = verts[i].y;
+      positions[i * 3 + 2] = verts[i].z;
+    }
+    const indices = new Uint32Array(idxs.length * 3);
+    for (let i = 0; i < idxs.length; i++) {
+      indices[i * 3] = idxs[i][0];
+      indices[i * 3 + 1] = idxs[i][1];
+      indices[i * 3 + 2] = idxs[i][2];
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    geo.computeVertexNormals();
+    return geo;
+  }, [upload.surface]);
+
+  const roleLabel = SURFACE_ROLES.find((r) => r.key === upload.role)?.label ?? upload.role;
+  const color = useMemo(() => new THREE.Color(SURFACE_COLORS[upload.role]), [upload.role]);
+
+  return (
+    <mesh
+      ref={meshRef}
+      geometry={geometry}
+      onPointerOver={(e) => {
+        e.stopPropagation();
+        onHover({
+          x: e.clientX,
+          y: e.clientY,
+          domain: roleLabel,
+          volume: 0,
+          surfaceFileName: upload.fileName,
+          surfaceRoleLabel: roleLabel,
+        });
+      }}
+      onPointerMove={(e) => {
+        e.stopPropagation();
+        onHover({
+          x: e.clientX,
+          y: e.clientY,
+          domain: roleLabel,
+          volume: 0,
+          surfaceFileName: upload.fileName,
+          surfaceRoleLabel: roleLabel,
+        });
+      }}
+      onPointerOut={() => onHover(null)}
+    >
+      <meshStandardMaterial
+        color={color}
+        side={THREE.DoubleSide}
+        transparent
+        opacity={0.3}
+        roughness={0.6}
+        metalness={0.1}
+      />
+    </mesh>
+  );
 }
 
 function DomainMesh({ solid, visible, onHover }: DomainMeshProps) {
@@ -214,6 +297,8 @@ interface ViewerProps {
   isDrawing: boolean;
   drawPoints: [number, number][];
   onAddDrawPoint: (x: number, y: number) => void;
+  uploads: Map<SurfaceRole, UploadedSurface>;
+  surfaceVisible: Set<SurfaceRole>;
 }
 
 export default function Viewer({
@@ -224,6 +309,8 @@ export default function Viewer({
   isDrawing,
   drawPoints,
   onAddDrawPoint,
+  uploads,
+  surfaceVisible,
 }: ViewerProps) {
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null);
 
@@ -260,6 +347,13 @@ export default function Viewer({
           />
         ))}
 
+        {[...uploads.entries()].map(
+          ([role, upload]) =>
+            surfaceVisible.has(role) && (
+              <SurfaceMesh key={role} upload={upload} onHover={setTooltip} />
+            ),
+        )}
+
         <BoundaryLines boundaries={boundaries} />
         <DrawingLayer
           points={drawPoints}
@@ -284,12 +378,21 @@ export default function Viewer({
           className="pointer-events-none absolute z-50 rounded-md bg-slate-900/90 px-3 py-2 text-xs text-white shadow-lg"
           style={{ left: tooltip.x + 12, top: tooltip.y - 40 }}
         >
-          <div className="font-medium">{tooltip.domain}</div>
-          <div className="text-slate-300">
-            {tooltip.volume.toFixed(1)} m³
-          </div>
-          {tooltip.blockName && (
-            <div className="text-slate-400">{tooltip.blockName}</div>
+          {tooltip.surfaceFileName ? (
+            <>
+              <div className="font-medium">{tooltip.surfaceRoleLabel}</div>
+              <div className="text-slate-300">{tooltip.surfaceFileName}</div>
+            </>
+          ) : (
+            <>
+              <div className="font-medium">{tooltip.domain}</div>
+              <div className="text-slate-300">
+                {tooltip.volume.toFixed(1)} m³
+              </div>
+              {tooltip.blockName && (
+                <div className="text-slate-400">{tooltip.blockName}</div>
+              )}
+            </>
           )}
         </div>
       )}
