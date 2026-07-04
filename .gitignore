@@ -4,3 +4,4 @@ dist/
 *.local
 target/
 crates/spatial-engine/pkg/
+test-results/
