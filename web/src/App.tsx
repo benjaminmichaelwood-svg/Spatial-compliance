@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type {
   Mode,
   SurfaceRole,
@@ -17,7 +17,9 @@ import SettingsPanel from './components/SettingsPanel';
 import BoundaryPanel from './components/BoundaryPanel';
 import LayerPanel from './components/LayerPanel';
 import Viewer from './components/Viewer';
+import CrossSectionPanel from './components/CrossSectionPanel';
 import ReportPanel from './components/report/ReportPanel';
+import { computeCrossSection } from './utils/crossSection';
 
 function makeFlatSurface(z: number, name: string, size = 20): TriSurface {
   const vertices: Vec3[] = [
@@ -47,6 +49,8 @@ export default function App() {
   const [drawPoints, setDrawPoints] = useState<[number, number][]>([]);
   const [mainTab, setMainTab] = useState<MainTab>('viewer');
   const [surfaceVisible, setSurfaceVisible] = useState<Set<SurfaceRole>>(new Set());
+  const [sectionLine, setSectionLine] = useState<[[number, number], [number, number]] | null>(null);
+  const [isDrawingSection, setIsDrawingSection] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -55,6 +59,10 @@ export default function App() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isDrawingSection) {
+        setIsDrawingSection(false);
+        return;
+      }
       if (!isDrawing) return;
       if (e.key === 'Enter') {
         finishDrawing();
@@ -66,7 +74,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [isDrawing, drawPoints]);
+  }, [isDrawing, isDrawingSection, drawPoints]);
 
   const finishDrawing = useCallback(() => {
     if (drawPoints.length >= 3) {
@@ -85,6 +93,7 @@ export default function App() {
   const handleStartDraw = useCallback(() => {
     setIsDrawing(true);
     setDrawPoints([]);
+    setIsDrawingSection(false);
   }, []);
 
   const handleAddDrawPoint = useCallback(
@@ -201,6 +210,26 @@ export default function App() {
     });
   }, []);
 
+  const handleStartSection = useCallback(() => {
+    setIsDrawingSection(true);
+    setIsDrawing(false);
+    setDrawPoints([]);
+  }, []);
+
+  const handleClearSection = useCallback(() => {
+    setSectionLine(null);
+    setIsDrawingSection(false);
+  }, []);
+
+  const handleSectionDrawComplete = useCallback(() => {
+    setIsDrawingSection(false);
+  }, []);
+
+  const crossSectionData = useMemo(() => {
+    if (!sectionLine || !result) return null;
+    return computeCrossSection(uploads, result.domains, sectionLine[0], sectionLine[1]);
+  }, [sectionLine, uploads, result]);
+
   const handleCapture = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -229,6 +258,8 @@ export default function App() {
               setUploads(new Map());
               setBoundaries([]);
               setMainTab('viewer');
+              setSectionLine(null);
+              setIsDrawingSection(false);
             }}
             className="text-sm text-slate-400 transition-colors hover:text-slate-600"
           >
@@ -253,6 +284,38 @@ export default function App() {
               <span className="text-xs text-slate-400">
                 {result.domains.length} solids
               </span>
+              {mainTab === 'viewer' && (
+                isDrawingSection ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsDrawingSection(false)}
+                    className="btn-secondary !py-1.5 !text-xs !border-amber-500/50 !text-amber-400"
+                  >
+                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                    Cancel Section
+                  </button>
+                ) : sectionLine ? (
+                  <button
+                    type="button"
+                    onClick={handleClearSection}
+                    className="btn-secondary !py-1.5 !text-xs !border-amber-500/50 !text-amber-400"
+                  >
+                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                    Clear Section
+                  </button>
+                ) : (
+                  <button type="button" onClick={handleStartSection} className="btn-secondary !py-1.5 !text-xs">
+                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+                    </svg>
+                    Cross Section
+                  </button>
+                )
+              )}
               <button type="button" onClick={handleCapture} className="btn-secondary !py-1.5 !text-xs">
                 <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
@@ -380,17 +443,30 @@ export default function App() {
                 canvasRef={canvasRef}
               />
             ) : (
-              <Viewer
-                result={result}
-                visible={visible}
-                canvasRef={canvasRef}
-                boundaries={boundaries}
-                isDrawing={isDrawing}
-                drawPoints={drawPoints}
-                onAddDrawPoint={handleAddDrawPoint}
-                uploads={uploads}
-                surfaceVisible={surfaceVisible}
-              />
+              <div className="flex h-full flex-col">
+                <div className={crossSectionData ? 'h-[60%]' : 'h-full'} style={{ minHeight: 0 }}>
+                  <Viewer
+                    result={result}
+                    visible={visible}
+                    canvasRef={canvasRef}
+                    boundaries={boundaries}
+                    isDrawing={isDrawing}
+                    drawPoints={drawPoints}
+                    onAddDrawPoint={handleAddDrawPoint}
+                    uploads={uploads}
+                    surfaceVisible={surfaceVisible}
+                    isDrawingSection={isDrawingSection}
+                    sectionLine={sectionLine}
+                    onSectionLineChange={setSectionLine}
+                    onSectionDrawComplete={handleSectionDrawComplete}
+                  />
+                </div>
+                {crossSectionData && (
+                  <div className="h-[40%] border-t border-slate-600" style={{ minHeight: 0 }}>
+                    <CrossSectionPanel data={crossSectionData} onClose={handleClearSection} />
+                  </div>
+                )}
+              </div>
             )
           ) : (
             <div className="flex h-full items-center justify-center bg-slate-50">

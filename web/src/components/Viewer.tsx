@@ -267,6 +267,147 @@ function DrawingLayer({ points, isDrawing, onAddPoint }: DrawingLayerProps) {
   );
 }
 
+interface SectionLineOverlayProps {
+  sectionLine: [[number, number], [number, number]] | null;
+  onChange: (line: [[number, number], [number, number]]) => void;
+  isDrawing: boolean;
+  onDrawComplete: () => void;
+  onDragChange: (dragging: boolean) => void;
+  displayZ: number;
+  sphereRadius: number;
+}
+
+function SectionLineOverlay({
+  sectionLine,
+  onChange,
+  isDrawing,
+  onDrawComplete,
+  onDragChange,
+  displayZ,
+  sphereRadius,
+}: SectionLineOverlayProps) {
+  const [tempStart, setTempStart] = useState<[number, number] | null>(null);
+  const draggingRef = useRef<number | null>(null);
+  const sectionLineRef = useRef(sectionLine);
+  sectionLineRef.current = sectionLine;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const onDragChangeRef = useRef(onDragChange);
+  onDragChangeRef.current = onDragChange;
+  const { camera, gl } = useThree();
+  const myRaycaster = useMemo(() => new THREE.Raycaster(), []);
+  const groundPlane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 0, 1), -displayZ), [displayZ]);
+
+  useEffect(() => {
+    if (!isDrawing) setTempStart(null);
+  }, [isDrawing]);
+
+  useEffect(() => {
+    const canvas = gl.domElement;
+
+    const getXY = (e: PointerEvent): [number, number] | null => {
+      const rect = canvas.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      myRaycaster.setFromCamera(mouse, camera);
+      const pt = new THREE.Vector3();
+      const hit = myRaycaster.ray.intersectPlane(groundPlane, pt);
+      return hit ? [pt.x, pt.y] : null;
+    };
+
+    const onMove = (e: PointerEvent) => {
+      if (draggingRef.current === null || !sectionLineRef.current) return;
+      const xy = getXY(e);
+      if (!xy) return;
+      const newLine = [[...sectionLineRef.current[0]], [...sectionLineRef.current[1]]] as [[number, number], [number, number]];
+      newLine[draggingRef.current] = xy;
+      onChangeRef.current(newLine);
+    };
+
+    const onUp = () => {
+      if (draggingRef.current !== null) {
+        draggingRef.current = null;
+        onDragChangeRef.current(false);
+      }
+    };
+
+    canvas.addEventListener('pointermove', onMove);
+    canvas.addEventListener('pointerup', onUp);
+    return () => {
+      canvas.removeEventListener('pointermove', onMove);
+      canvas.removeEventListener('pointerup', onUp);
+    };
+  }, [gl, camera, myRaycaster, groundPlane]);
+
+  const handlePlaneClick = useCallback(
+    (e: any) => {
+      if (!isDrawing) return;
+      e.stopPropagation();
+      const p = e.point;
+      if (!p) return;
+      if (!tempStart) {
+        setTempStart([p.x, p.y]);
+      } else {
+        onChange([tempStart, [p.x, p.y]]);
+        setTempStart(null);
+        onDrawComplete();
+      }
+    },
+    [isDrawing, tempStart, onChange, onDrawComplete],
+  );
+
+  return (
+    <>
+      {isDrawing && (
+        <mesh
+          visible={false}
+          onClick={handlePlaneClick}
+          position={[0, 0, displayZ]}
+        >
+          <planeGeometry args={[100000, 100000]} />
+          <meshBasicMaterial transparent opacity={0} />
+        </mesh>
+      )}
+
+      {sectionLine && (
+        <>
+          <Line
+            points={[
+              [sectionLine[0][0], sectionLine[0][1], displayZ],
+              [sectionLine[1][0], sectionLine[1][1], displayZ],
+            ]}
+            color="#f59e0b"
+            lineWidth={2.5}
+          />
+          {sectionLine.map((pt, i) => (
+            <mesh
+              key={i}
+              position={[pt[0], pt[1], displayZ]}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                draggingRef.current = i;
+                onDragChange(true);
+              }}
+            >
+              <sphereGeometry args={[sphereRadius, 16, 16]} />
+              <meshBasicMaterial color="#f59e0b" />
+            </mesh>
+          ))}
+        </>
+      )}
+
+      {tempStart && (
+        <mesh position={[tempStart[0], tempStart[1], displayZ]}>
+          <sphereGeometry args={[sphereRadius * 0.8, 16, 16]} />
+          <meshBasicMaterial color="#f59e0b" />
+        </mesh>
+      )}
+    </>
+  );
+}
+
 function BoundaryLines({ boundaries }: { boundaries: BoundaryRegion[] }) {
   const colors = ['#06b6d4', '#8b5cf6', '#ec4899', '#10b981', '#f59e0b'];
   return (
@@ -299,6 +440,10 @@ interface ViewerProps {
   onAddDrawPoint: (x: number, y: number) => void;
   uploads: Map<SurfaceRole, UploadedSurface>;
   surfaceVisible: Set<SurfaceRole>;
+  isDrawingSection: boolean;
+  sectionLine: [[number, number], [number, number]] | null;
+  onSectionLineChange: (line: [[number, number], [number, number]]) => void;
+  onSectionDrawComplete: () => void;
 }
 
 export default function Viewer({
@@ -311,8 +456,30 @@ export default function Viewer({
   onAddDrawPoint,
   uploads,
   surfaceVisible,
+  isDrawingSection,
+  sectionLine,
+  onSectionLineChange,
+  onSectionDrawComplete,
 }: ViewerProps) {
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null);
+  const [isDraggingEndpoint, setIsDraggingEndpoint] = useState(false);
+
+  const { displayZ, sphereRadius } = useMemo(() => {
+    const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
+    for (const d of result.domains) {
+      for (const v of d.solid.vertices) {
+        if (v.x < box.minX) box.minX = v.x;
+        if (v.x > box.maxX) box.maxX = v.x;
+        if (v.y < box.minY) box.minY = v.y;
+        if (v.y > box.maxY) box.maxY = v.y;
+        if (v.z < box.minZ) box.minZ = v.z;
+        if (v.z > box.maxZ) box.maxZ = v.z;
+      }
+    }
+    if (!isFinite(box.minX)) return { displayZ: 0, sphereRadius: 1 };
+    const maxDim = Math.max(box.maxX - box.minX, box.maxY - box.minY, box.maxZ - box.minZ);
+    return { displayZ: (box.minZ + box.maxZ) / 2, sphereRadius: maxDim * 0.008 };
+  }, [result.domains]);
 
   const handleCreated = useCallback(
     (state: { gl: THREE.WebGLRenderer }) => {
@@ -354,6 +521,16 @@ export default function Viewer({
             ),
         )}
 
+        <SectionLineOverlay
+          sectionLine={sectionLine}
+          onChange={onSectionLineChange}
+          isDrawing={isDrawingSection}
+          onDrawComplete={onSectionDrawComplete}
+          onDragChange={setIsDraggingEndpoint}
+          displayZ={displayZ}
+          sphereRadius={sphereRadius}
+        />
+
         <BoundaryLines boundaries={boundaries} />
         <DrawingLayer
           points={drawPoints}
@@ -363,7 +540,7 @@ export default function Viewer({
 
         <AutoFit domains={result.domains} visible={visible} />
 
-        <OrbitControls makeDefault enableDamping dampingFactor={0.1} enabled={!isDrawing} />
+        <OrbitControls makeDefault enableDamping dampingFactor={0.1} enabled={!isDrawing && !isDrawingSection && !isDraggingEndpoint} />
         <GizmoHelper alignment="bottom-right" margin={[60, 60]}>
           <GizmoViewport labelColor="white" axisHeadScale={0.8} />
         </GizmoHelper>
@@ -400,6 +577,12 @@ export default function Viewer({
       {isDrawing && (
         <div className="absolute left-3 top-3 rounded-md bg-orange-500/90 px-3 py-1.5 text-xs font-medium text-white shadow">
           Click to place points · Double-click or press Enter to close
+        </div>
+      )}
+
+      {isDrawingSection && (
+        <div className="absolute left-3 top-3 rounded-md bg-amber-500/90 px-3 py-1.5 text-xs font-medium text-white shadow">
+          Click two points to define section line
         </div>
       )}
     </div>
