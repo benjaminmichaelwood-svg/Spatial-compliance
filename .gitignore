@@ -5,3 +5,4 @@ dist/
 target/
 crates/spatial-engine/pkg/
 test-results/
+crates/spatial-engine/testdata/
