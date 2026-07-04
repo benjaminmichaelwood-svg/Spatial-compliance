@@ -6,7 +6,8 @@ let wasmModule: any = null;
 export async function initWasm(): Promise<void> {
   if (initialized) return;
   const mod = await import('spatial-engine');
-  await mod.default({ module_or_path: '/spatial_engine_bg.wasm' });
+  const base = import.meta.env.BASE_URL ?? '/';
+  await mod.default({ module_or_path: `${base}spatial_engine_bg.wasm` });
   wasmModule = mod;
   initialized = true;
 }
