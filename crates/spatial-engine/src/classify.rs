@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::boundary::assign_cell_to_boundary;
 use crate::cutfill::SliverFilter;
 use crate::solid::{avg_thickness, compute_signed_volume, compute_surface_area};
-use crate::types::{SolidMesh, TriSurface, Vec3};
+use crate::types::{BlockSummary, BoundaryRegion, SolidMesh, TriSurface, Vec3};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -77,6 +78,8 @@ pub struct DomainSolid {
     pub color: String,
     pub solid: SolidMesh,
     pub volume: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +96,8 @@ pub struct ConformanceSummary {
     pub conformance_volume: f64,
     pub conformance_percent: f64,
     pub domain_volumes: Vec<(String, f64)>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub block_summaries: Vec<BlockSummary>,
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +113,7 @@ pub struct ConformanceInput<'a> {
     pub mode: Mode,
     pub resolution: usize,
     pub filter: SliverFilter,
+    pub boundaries: &'a [BoundaryRegion],
 }
 
 // ---------------------------------------------------------------------------
@@ -508,21 +514,33 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
         Domain::DumpPrescheduleDelay,
         Domain::DumpedAheadOfPlan,
     ];
-    let active_domains = match input.mode {
+    let _active_domains = match input.mode {
         Mode::Dig => &dig_domains[..],
         Mode::Dump => &dump_domains[..],
     };
 
-    let mut builders: Vec<(Domain, MeshBuilder)> = active_domains
-        .iter()
-        .map(|&d| (d, MeshBuilder::new()))
-        .collect();
+    use std::collections::HashMap;
+
+    let has_boundaries = !input.boundaries.is_empty();
+
+    // Key: (domain, boundary_index) where None means no boundary or unassigned
+    let mut builders: HashMap<(Domain, Option<usize>), MeshBuilder> = HashMap::new();
 
     // Iterate grid cells — sample all 5 surfaces at each cell centre
     for iy in 0..ny {
         for ix in 0..nx {
             let cx = min_x + (ix as f64 + 0.5) * cell_size;
             let cy = min_y + (iy as f64 + 0.5) * cell_size;
+
+            // If boundaries are defined, skip cells outside all boundaries
+            let block_idx = if has_boundaries {
+                match assign_cell_to_boundary(cx, cy, input.boundaries) {
+                    Some(idx) => Some(idx),
+                    None => continue,
+                }
+            } else {
+                None
+            };
 
             let zs: Vec<Option<f64>> = surfaces.iter().map(|s| interpolate_z(s, cx, cy)).collect();
             let (ps, pe) = match (zs[0], zs[1]) {
@@ -542,17 +560,24 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
             };
 
             for iv in &intervals {
-                if let Some((_, builder)) = builders.iter_mut().find(|(d, _)| *d == iv.domain) {
-                    builder.add_prism(cx, cy, cell_size, iv.upper, iv.lower);
-                }
+                let key = (iv.domain, block_idx);
+                builders
+                    .entry(key)
+                    .or_insert_with(MeshBuilder::new)
+                    .add_prism(cx, cy, cell_size, iv.upper, iv.lower);
             }
         }
     }
 
     // Convert builders into DomainSolids, applying the sliver filter
     let mut domains: Vec<DomainSolid> = Vec::new();
-    for (domain, builder) in builders {
-        if let Some(solid) = builder.into_solid(domain.label().to_string()) {
+    for ((domain, block_idx), builder) in builders {
+        let block_name = block_idx.map(|i| input.boundaries[i].name.clone());
+        let label = match &block_name {
+            Some(bn) => format!("{} — {}", domain.label(), bn),
+            None => domain.label().to_string(),
+        };
+        if let Some(solid) = builder.into_solid(label.clone()) {
             if solid.volume < input.filter.min_volume_m3 {
                 continue;
             }
@@ -562,10 +587,11 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
             let volume = solid.volume;
             domains.push(DomainSolid {
                 domain,
-                label: domain.label().to_string(),
+                label,
                 color: domain.color().to_string(),
                 solid,
                 volume,
+                block_name,
             });
         }
     }
@@ -626,10 +652,40 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
         0.0
     };
 
-    let domain_volumes: Vec<(String, f64)> = domains
-        .iter()
-        .map(|d| (d.label.clone(), d.volume))
-        .collect();
+    let domain_volumes: Vec<(String, f64)> = {
+        let mut dv: HashMap<String, f64> = HashMap::new();
+        for d in &domains {
+            *dv.entry(d.domain.label().to_string()).or_insert(0.0) += d.volume;
+        }
+        dv.into_iter().collect()
+    };
+
+    // Block-level summaries
+    let block_summaries = if has_boundaries {
+        let mut block_map: HashMap<String, HashMap<String, f64>> = HashMap::new();
+        for d in &domains {
+            let bn = d.block_name.clone().unwrap_or_else(|| "Unassigned".into());
+            *block_map
+                .entry(bn)
+                .or_default()
+                .entry(d.domain.label().to_string())
+                .or_insert(0.0) += d.volume;
+        }
+        block_map
+            .into_iter()
+            .map(|(block_name, dv)| {
+                let total_volume = dv.values().sum();
+                let domain_volumes = dv.into_iter().collect();
+                BlockSummary {
+                    block_name,
+                    domain_volumes,
+                    total_volume,
+                }
+            })
+            .collect()
+    } else {
+        vec![]
+    };
 
     ConformanceResult {
         mode: input.mode,
@@ -640,6 +696,7 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
             conformance_volume: conformance_vol,
             conformance_percent: conformance_pct,
             domain_volumes,
+            block_summaries,
         },
     }
 }
@@ -654,6 +711,7 @@ fn empty_result(mode: Mode) -> ConformanceResult {
             conformance_volume: 0.0,
             conformance_percent: 0.0,
             domain_volumes: vec![],
+            block_summaries: vec![],
         },
     }
 }
@@ -700,6 +758,7 @@ mod tests {
                 min_volume_m3: 0.01,
                 min_thickness_m: 0.001,
             },
+            boundaries: &[],
         })
     }
 
@@ -1112,6 +1171,7 @@ mod tests {
                 min_volume_m3: 0.5,
                 min_thickness_m: 0.05,
             },
+            boundaries: &[],
         });
 
         assert!(
@@ -1139,5 +1199,81 @@ mod tests {
                 d.domain
             );
         }
+    }
+
+    #[test]
+    fn boundary_splits_volume() {
+        let ps = flat(100.0, "ps", 20.0);
+        let pe = flat(90.0, "pe", 20.0);
+        let ss = flat(100.0, "ss", 20.0);
+        let se = flat(90.0, "se", 20.0);
+        let sf = flat(85.0, "sf", 20.0);
+
+        let boundaries = vec![
+            BoundaryRegion {
+                name: "Left".into(),
+                polygon: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 20.0], [0.0, 20.0]],
+            },
+            BoundaryRegion {
+                name: "Right".into(),
+                polygon: vec![[10.0, 0.0], [20.0, 0.0], [20.0, 20.0], [10.0, 20.0]],
+            },
+        ];
+
+        let r = classify_conformance(&ConformanceInput {
+            production_start: &ps,
+            production_end: &pe,
+            schedule_start: &ss,
+            schedule_end: &se,
+            schedule_future: &sf,
+            mode: Mode::Dig,
+            resolution: 40,
+            filter: SliverFilter {
+                min_volume_m3: 0.01,
+                min_thickness_m: 0.001,
+            },
+            boundaries: &boundaries,
+        });
+
+        let left_vol: f64 = r
+            .domains
+            .iter()
+            .filter(|d| d.block_name.as_deref() == Some("Left"))
+            .map(|d| d.volume)
+            .sum();
+        let right_vol: f64 = r
+            .domains
+            .iter()
+            .filter(|d| d.block_name.as_deref() == Some("Right"))
+            .map(|d| d.volume)
+            .sum();
+
+        // Total should be ~4000 m³ (20x20 area × 10m height)
+        let total = left_vol + right_vol;
+        assert!(
+            (total - 4000.0).abs() < 200.0,
+            "Total volume {total} not near 4000"
+        );
+        assert!(
+            (left_vol - right_vol).abs() / total < 0.1,
+            "Volumes should be roughly equal: left={left_vol}, right={right_vol}"
+        );
+
+        // Block summaries should exist
+        assert_eq!(r.summary.block_summaries.len(), 2);
+    }
+
+    #[test]
+    fn no_boundaries_means_no_block_names() {
+        let r = run(
+            &flat(100.0, "ps", 10.0),
+            &flat(90.0, "pe", 10.0),
+            &flat(100.0, "ss", 10.0),
+            &flat(90.0, "se", 10.0),
+            &flat(85.0, "sf", 10.0),
+            Mode::Dig,
+        );
+        assert!(r.domains.iter().all(|d| d.block_name.is_none()));
+        assert!(r.summary.block_summaries.is_empty());
     }
 }

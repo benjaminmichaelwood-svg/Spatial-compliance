@@ -151,6 +151,19 @@ pub struct SolidMesh {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundaryRegion {
+    pub name: String,
+    pub polygon: Vec<[f64; 2]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockSummary {
+    pub block_name: String,
+    pub domain_volumes: Vec<(String, f64)>,
+    pub total_volume: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CutFillResult {
     pub cut_solids: Vec<SolidMesh>,
     pub fill_solids: Vec<SolidMesh>,

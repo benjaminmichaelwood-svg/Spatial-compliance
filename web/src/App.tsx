@@ -7,12 +7,14 @@ import type {
   ConformanceResult,
   TriSurface,
   Vec3,
+  BoundaryRegion,
 } from './types';
 import { DEFAULT_SETTINGS, SURFACE_ROLES } from './types';
-import { initWasm, runConformance } from './wasm';
+import { initWasm, runConformance, runConformanceWithBoundaries } from './wasm';
 import LandingPage from './components/LandingPage';
 import UploadZone from './components/UploadZone';
 import SettingsPanel from './components/SettingsPanel';
+import BoundaryPanel from './components/BoundaryPanel';
 import LayerPanel from './components/LayerPanel';
 import Viewer from './components/Viewer';
 
@@ -37,11 +39,66 @@ export default function App() {
   const [visible, setVisible] = useState<Set<string>>(new Set());
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [boundaries, setBoundaries] = useState<BoundaryRegion[]>([]);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [drawPoints, setDrawPoints] = useState<[number, number][]>([]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     initWasm().then(() => setWasmReady(true));
   }, []);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!isDrawing) return;
+      if (e.key === 'Enter') {
+        finishDrawing();
+      } else if (e.key === 'Escape') {
+        cancelDrawing();
+      } else if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
+        setDrawPoints((p) => p.slice(0, -1));
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [isDrawing, drawPoints]);
+
+  const finishDrawing = useCallback(() => {
+    if (drawPoints.length >= 3) {
+      const name = `Region ${boundaries.length + 1}`;
+      setBoundaries((prev) => [...prev, { name, polygon: drawPoints }]);
+    }
+    setIsDrawing(false);
+    setDrawPoints([]);
+  }, [drawPoints, boundaries.length]);
+
+  const cancelDrawing = useCallback(() => {
+    setIsDrawing(false);
+    setDrawPoints([]);
+  }, []);
+
+  const handleStartDraw = useCallback(() => {
+    setIsDrawing(true);
+    setDrawPoints([]);
+  }, []);
+
+  const handleAddDrawPoint = useCallback(
+    (x: number, y: number) => {
+      if (!isDrawing) return;
+      setDrawPoints((prev) => {
+        if (prev.length >= 3) {
+          const [fx, fy] = prev[0];
+          const dist = Math.sqrt((x - fx) ** 2 + (y - fy) ** 2);
+          if (dist < 1.0) {
+            setTimeout(() => finishDrawing(), 0);
+            return prev;
+          }
+        }
+        return [...prev, [x, y]];
+      });
+    },
+    [isDrawing, finishDrawing],
+  );
 
   const handleStart = useCallback((name: string, m: Mode) => {
     setComparisonName(name);
@@ -94,13 +151,23 @@ export default function App() {
         surfaces[key] = entry.surface;
       }
 
-      const res = runConformance(
-        surfaces,
-        mode,
-        settings.resolution,
-        settings.minVolume,
-        settings.minThickness,
-      );
+      const res =
+        boundaries.length > 0
+          ? runConformanceWithBoundaries(
+              surfaces,
+              mode,
+              settings.resolution,
+              settings.minVolume,
+              settings.minThickness,
+              boundaries,
+            )
+          : runConformance(
+              surfaces,
+              mode,
+              settings.resolution,
+              settings.minVolume,
+              settings.minThickness,
+            );
 
       setResult(res);
       setVisible(new Set(res.domains.map((d) => d.domain)));
@@ -109,7 +176,7 @@ export default function App() {
     } finally {
       setIsRunning(false);
     }
-  }, [uploads, mode, settings]);
+  }, [uploads, mode, settings, boundaries]);
 
   const handleToggle = useCallback((domain: string) => {
     setVisible((prev) => {
@@ -146,6 +213,7 @@ export default function App() {
               setStep('landing');
               setResult(null);
               setUploads(new Map());
+              setBoundaries([]);
             }}
             className="text-sm text-slate-400 transition-colors hover:text-slate-600"
           >
@@ -191,6 +259,13 @@ export default function App() {
           />
 
           <SettingsPanel settings={settings} onChange={setSettings} />
+
+          <BoundaryPanel
+            boundaries={boundaries}
+            onChange={setBoundaries}
+            onStartDraw={handleStartDraw}
+            isDrawing={isDrawing}
+          />
 
           {/* Run Button */}
           <div className="sidebar-section">
@@ -240,7 +315,15 @@ export default function App() {
         {/* Main content */}
         <main className="flex-1 overflow-hidden">
           {result ? (
-            <Viewer result={result} visible={visible} canvasRef={canvasRef} />
+            <Viewer
+              result={result}
+              visible={visible}
+              canvasRef={canvasRef}
+              boundaries={boundaries}
+              isDrawing={isDrawing}
+              drawPoints={drawPoints}
+              onAddDrawPoint={handleAddDrawPoint}
+            />
           ) : (
             <div className="flex h-full items-center justify-center bg-slate-50">
               <div className="text-center">
@@ -262,6 +345,35 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Drawing controls overlay */}
+      {isDrawing && (
+        <div className="absolute bottom-6 left-1/2 z-50 flex -translate-x-1/2 gap-2 rounded-lg bg-slate-900/90 px-4 py-2 shadow-xl">
+          <button
+            type="button"
+            onClick={() => setDrawPoints((p) => p.slice(0, -1))}
+            disabled={drawPoints.length === 0}
+            className="rounded bg-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-600 disabled:opacity-40"
+          >
+            Undo
+          </button>
+          <button
+            type="button"
+            onClick={finishDrawing}
+            disabled={drawPoints.length < 3}
+            className="rounded bg-indigo-600 px-3 py-1 text-xs text-white hover:bg-indigo-500 disabled:opacity-40"
+          >
+            Close Polygon
+          </button>
+          <button
+            type="button"
+            onClick={cancelDrawing}
+            className="rounded bg-red-600/80 px-3 py-1 text-xs text-white hover:bg-red-500"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
     </div>
   );
 }

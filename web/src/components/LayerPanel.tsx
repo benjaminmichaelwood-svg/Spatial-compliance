@@ -29,6 +29,8 @@ export default function LayerPanel({ result, visible, onToggle }: Props) {
     }
   }
 
+  const blockSummaries = result.summary.block_summaries ?? [];
+
   return (
     <div className="sidebar-section">
       <div className="sidebar-heading">Conformance Domains</div>
@@ -110,6 +112,34 @@ export default function LayerPanel({ result, visible, onToggle }: Props) {
           </div>
         </div>
       </div>
+
+      {blockSummaries.length > 0 && (
+        <div className="mt-3 rounded-lg bg-slate-800/50 p-3">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+            Volume by Block
+          </div>
+          <div className="space-y-3">
+            {blockSummaries.map((block) => (
+              <div key={block.block_name}>
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="text-xs font-medium text-slate-200">{block.block_name}</span>
+                  <span className="font-mono text-[10px] text-slate-400">
+                    {formatVolume(block.total_volume)} m³
+                  </span>
+                </div>
+                <div className="space-y-0.5">
+                  {block.domain_volumes.map(([label, vol]) => (
+                    <div key={label} className="flex justify-between text-[10px]">
+                      <span className="truncate text-slate-500">{label}</span>
+                      <span className="font-mono text-slate-400">{formatVolume(vol)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

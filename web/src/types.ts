@@ -41,6 +41,18 @@ export interface DomainSolid {
   color: string;
   solid: SolidMesh;
   volume: number;
+  block_name?: string;
+}
+
+export interface BlockSummary {
+  block_name: string;
+  domain_volumes: [string, number][];
+  total_volume: number;
+}
+
+export interface BoundaryRegion {
+  name: string;
+  polygon: [number, number][];
 }
 
 export interface ConformanceSummary {
@@ -49,6 +61,7 @@ export interface ConformanceSummary {
   conformance_volume: number;
   conformance_percent: number;
   domain_volumes: [string, number][];
+  block_summaries?: BlockSummary[];
 }
 
 export interface ConformanceResult {
