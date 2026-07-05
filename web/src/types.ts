@@ -87,3 +87,13 @@ export const DEFAULT_SETTINGS: Settings = {
   minVolume: 1.0,
   minThickness: 0.1,
 };
+
+export interface ObjectStyle {
+  color: string;
+  opacity: number;
+  wireframe: boolean;
+}
+
+export type MeasureTool = 'none' | 'distance' | 'elevation' | 'area';
+export type ViewPreset = 'plan' | 'north' | 'east' | 'isometric' | 'fit';
+export type ViewerBackground = 'dark' | 'light';

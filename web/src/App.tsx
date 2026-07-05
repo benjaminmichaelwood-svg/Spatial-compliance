@@ -8,6 +8,10 @@ import type {
   TriSurface,
   Vec3,
   BoundaryRegion,
+  ObjectStyle,
+  MeasureTool,
+  ViewPreset,
+  ViewerBackground,
 } from './types';
 import { DEFAULT_SETTINGS, SURFACE_ROLES } from './types';
 import { initWasm, runConformance, runConformanceWithBoundaries } from './wasm';
@@ -17,6 +21,7 @@ import SettingsPanel from './components/SettingsPanel';
 import BoundaryPanel from './components/BoundaryPanel';
 import LayerPanel from './components/LayerPanel';
 import Viewer from './components/Viewer';
+import type { ViewerHandle, SelectionInfo, MeasurePoint } from './components/Viewer';
 import CrossSectionPanel from './components/CrossSectionPanel';
 import ReportPanel from './components/report/ReportPanel';
 import { computeCrossSection } from './utils/crossSection';
@@ -32,6 +37,20 @@ function makeFlatSurface(z: number, name: string, size = 20): TriSurface {
 }
 
 type MainTab = 'viewer' | 'reports';
+
+const VIEW_PRESETS: { key: ViewPreset; label: string; icon: string }[] = [
+  { key: 'plan', label: 'Plan', icon: 'P' },
+  { key: 'north', label: 'North', icon: 'N' },
+  { key: 'east', label: 'East', icon: 'E' },
+  { key: 'isometric', label: 'Iso', icon: 'I' },
+  { key: 'fit', label: 'Fit', icon: 'F' },
+];
+
+function formatVolume(v: number): string {
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
+  return v.toFixed(1);
+}
 
 export default function App() {
   const [wasmReady, setWasmReady] = useState(false);
@@ -52,6 +71,15 @@ export default function App() {
   const [sectionLine, setSectionLine] = useState<[[number, number], [number, number]] | null>(null);
   const [isDrawingSection, setIsDrawingSection] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const viewerRef = useRef<ViewerHandle>(null);
+
+  const [background, setBackground] = useState<ViewerBackground>('dark');
+  const [domainStyles, setDomainStyles] = useState<Map<string, ObjectStyle>>(new Map());
+  const [surfaceStyles, setSurfaceStyles] = useState<Map<SurfaceRole, ObjectStyle>>(new Map());
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectionInfo, setSelectionInfo] = useState<SelectionInfo | null>(null);
+  const [measureTool, setMeasureTool] = useState<MeasureTool>('none');
+  const [measurePoints, setMeasurePoints] = useState<MeasurePoint[]>([]);
 
   useEffect(() => {
     initWasm().then(() => setWasmReady(true));
@@ -59,22 +87,39 @@ export default function App() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isDrawingSection) {
-        setIsDrawingSection(false);
-        return;
+      if (e.key === 'Escape') {
+        if (measureTool !== 'none') {
+          setMeasureTool('none');
+          setMeasurePoints([]);
+          return;
+        }
+        if (isDrawingSection) {
+          setIsDrawingSection(false);
+          return;
+        }
+        if (isDrawing) {
+          cancelDrawing();
+          return;
+        }
+        if (selectedId) {
+          setSelectedId(null);
+          setSelectionInfo(null);
+          return;
+        }
       }
       if (!isDrawing) return;
       if (e.key === 'Enter') {
+        if (measureTool === 'area' && measurePoints.length >= 3) {
+          return;
+        }
         finishDrawing();
-      } else if (e.key === 'Escape') {
-        cancelDrawing();
       } else if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
         setDrawPoints((p) => p.slice(0, -1));
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [isDrawing, isDrawingSection, drawPoints]);
+  }, [isDrawing, isDrawingSection, drawPoints, measureTool, selectedId, measurePoints.length]);
 
   const finishDrawing = useCallback(() => {
     if (drawPoints.length >= 3) {
@@ -94,6 +139,8 @@ export default function App() {
     setIsDrawing(true);
     setDrawPoints([]);
     setIsDrawingSection(false);
+    setMeasureTool('none');
+    setMeasurePoints([]);
   }, []);
 
   const handleAddDrawPoint = useCallback(
@@ -167,21 +214,8 @@ export default function App() {
 
       const res =
         boundaries.length > 0
-          ? runConformanceWithBoundaries(
-              surfaces,
-              mode,
-              settings.resolution,
-              settings.minVolume,
-              settings.minThickness,
-              boundaries,
-            )
-          : runConformance(
-              surfaces,
-              mode,
-              settings.resolution,
-              settings.minVolume,
-              settings.minThickness,
-            );
+          ? runConformanceWithBoundaries(surfaces, mode, settings.resolution, settings.minVolume, settings.minThickness, boundaries)
+          : runConformance(surfaces, mode, settings.resolution, settings.minVolume, settings.minThickness);
 
       setResult(res);
       setVisible(new Set(res.domains.map((d) => d.domain)));
@@ -210,10 +244,52 @@ export default function App() {
     });
   }, []);
 
+  const handleDomainStyleChange = useCallback((domain: string, style: ObjectStyle) => {
+    setDomainStyles((prev) => {
+      const next = new Map(prev);
+      next.set(domain, style);
+      return next;
+    });
+  }, []);
+
+  const handleSurfaceStyleChange = useCallback((role: SurfaceRole, style: ObjectStyle) => {
+    setSurfaceStyles((prev) => {
+      const next = new Map(prev);
+      next.set(role, style);
+      return next;
+    });
+  }, []);
+
+  const handleSelect = useCallback((id: string | null, info: SelectionInfo | null) => {
+    setSelectedId(id);
+    setSelectionInfo(info);
+  }, []);
+
+  const handleAddMeasurePoint = useCallback((point: MeasurePoint) => {
+    setMeasurePoints((prev) => {
+      if (measureTool === 'distance' && prev.length >= 2) return [point];
+      if (measureTool === 'elevation') return [point];
+      return [...prev, point];
+    });
+  }, [measureTool]);
+
+  const handleMeasureToolChange = useCallback((tool: MeasureTool) => {
+    setMeasureTool(tool);
+    setMeasurePoints([]);
+    if (tool !== 'none') {
+      setIsDrawing(false);
+      setIsDrawingSection(false);
+      setSelectedId(null);
+      setSelectionInfo(null);
+    }
+  }, []);
+
   const handleStartSection = useCallback(() => {
     setIsDrawingSection(true);
     setIsDrawing(false);
     setDrawPoints([]);
+    setMeasureTool('none');
+    setMeasurePoints([]);
   }, []);
 
   const handleClearSection = useCallback(() => {
@@ -239,6 +315,10 @@ export default function App() {
     link.click();
   }, [comparisonName]);
 
+  const handlePreset = useCallback((preset: ViewPreset) => {
+    viewerRef.current?.applyPreset(preset);
+  }, []);
+
   if (step === 'landing') {
     return <LandingPage onStart={handleStart} />;
   }
@@ -248,7 +328,7 @@ export default function App() {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden">
       {/* Header */}
-      <header className="flex h-12 flex-shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4">
+      <header className="flex h-11 flex-shrink-0 items-center justify-between border-b border-slate-700 bg-slate-900 px-3">
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -260,86 +340,154 @@ export default function App() {
               setMainTab('viewer');
               setSectionLine(null);
               setIsDrawingSection(false);
+              setMeasureTool('none');
+              setMeasurePoints([]);
+              setSelectedId(null);
+              setSelectionInfo(null);
             }}
-            className="text-sm text-slate-400 transition-colors hover:text-slate-600"
+            className="text-sm text-slate-500 transition-colors hover:text-slate-300"
           >
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
             </svg>
           </button>
-          <h1 className="text-sm font-semibold text-slate-800">{comparisonName}</h1>
+          <h1 className="text-sm font-semibold text-slate-200">{comparisonName}</h1>
           <span
-            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+            className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
               mode === 'dig'
-                ? 'bg-amber-100 text-amber-700'
-                : 'bg-emerald-100 text-emerald-700'
+                ? 'bg-amber-900/50 text-amber-400'
+                : 'bg-emerald-900/50 text-emerald-400'
             }`}
           >
             {mode}
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          {result && (
-            <>
-              <span className="text-xs text-slate-400">
-                {result.domains.length} solids
-              </span>
-              {mainTab === 'viewer' && (
-                isDrawingSection ? (
-                  <button
-                    type="button"
-                    onClick={() => setIsDrawingSection(false)}
-                    className="btn-secondary !py-1.5 !text-xs !border-amber-500/50 !text-amber-400"
-                  >
-                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                    Cancel Section
-                  </button>
-                ) : sectionLine ? (
-                  <button
-                    type="button"
-                    onClick={handleClearSection}
-                    className="btn-secondary !py-1.5 !text-xs !border-amber-500/50 !text-amber-400"
-                  >
-                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                    Clear Section
-                  </button>
-                ) : (
-                  <button type="button" onClick={handleStartSection} className="btn-secondary !py-1.5 !text-xs">
-                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
-                    </svg>
-                    Cross Section
-                  </button>
-                )
-              )}
-              <button type="button" onClick={handleCapture} className="btn-secondary !py-1.5 !text-xs">
+
+        {/* Toolbar */}
+        {result && mainTab === 'viewer' && (
+          <div className="flex items-center gap-1">
+            {/* View presets */}
+            <div className="flex items-center gap-0.5 rounded bg-slate-800 p-0.5">
+              {VIEW_PRESETS.map(({ key, label, icon }) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => handlePreset(key)}
+                  className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"
+                  title={label}
+                >
+                  {icon}
+                </button>
+              ))}
+            </div>
+
+            <div className="mx-1 h-4 w-px bg-slate-700" />
+
+            {/* Background toggle */}
+            <button
+              type="button"
+              onClick={() => setBackground(b => b === 'dark' ? 'light' : 'dark')}
+              className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"
+              title={`Background: ${background}`}
+            >
+              {background === 'dark' ? (
                 <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
                 </svg>
-                Capture View
+              ) : (
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+              )}
+            </button>
+
+            <div className="mx-1 h-4 w-px bg-slate-700" />
+
+            {/* Measure tools */}
+            <div className="flex items-center gap-0.5 rounded bg-slate-800 p-0.5">
+              <button
+                type="button"
+                onClick={() => handleMeasureToolChange(measureTool === 'distance' ? 'none' : 'distance')}
+                className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                  measureTool === 'distance' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
+                }`}
+                title="Measure distance"
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                </svg>
               </button>
-            </>
-          )}
-        </div>
+              <button
+                type="button"
+                onClick={() => handleMeasureToolChange(measureTool === 'area' ? 'none' : 'area')}
+                className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                  measureTool === 'area' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
+                }`}
+                title="Measure area"
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5z" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="mx-1 h-4 w-px bg-slate-700" />
+
+            {/* Section tools */}
+            {isDrawingSection ? (
+              <button
+                type="button"
+                onClick={() => setIsDrawingSection(false)}
+                className="rounded bg-amber-600 px-2 py-1 text-[10px] font-medium text-white hover:bg-amber-500"
+              >
+                Cancel
+              </button>
+            ) : sectionLine ? (
+              <button
+                type="button"
+                onClick={handleClearSection}
+                className="rounded px-2 py-1 text-[10px] font-medium text-amber-400 hover:bg-slate-700"
+              >
+                Clear Section
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleStartSection}
+                className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white"
+                title="Cross Section"
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+                </svg>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={handleCapture}
+              className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white"
+              title="Capture View"
+            >
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </button>
+
+            <span className="ml-2 text-[10px] text-slate-500">
+              {result.domains.length} solids
+            </span>
+          </div>
+        )}
       </header>
 
       {/* Body */}
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar */}
         <aside className="flex w-64 flex-shrink-0 flex-col overflow-y-auto bg-sidebar text-slate-200 scrollbar-thin">
-          <UploadZone
-            uploads={uploads}
-            onUpdate={setUploads}
-            onLoadSample={handleLoadSample}
-          />
-
+          <UploadZone uploads={uploads} onUpdate={setUploads} onLoadSample={handleLoadSample} />
           <SettingsPanel settings={settings} onChange={setSettings} />
-
           <BoundaryPanel
             boundaries={boundaries}
             onChange={setBoundaries}
@@ -377,9 +525,7 @@ export default function App() {
                 </>
               )}
             </button>
-            {error && (
-              <p className="mt-2 text-xs text-red-400">{error}</p>
-            )}
+            {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
           </div>
 
           {/* Tab switcher */}
@@ -390,28 +536,18 @@ export default function App() {
                   type="button"
                   onClick={() => setMainTab('viewer')}
                   className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                    mainTab === 'viewer'
-                      ? 'bg-indigo-600 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
+                    mainTab === 'viewer' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  <svg className="mr-1.5 inline h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-2.25-1.313M21 7.5v2.25m0-2.25l-2.25 1.313M3 7.5l2.25-1.313M3 7.5l2.25 1.313M3 7.5v2.25m9 3l2.25-1.313M12 12.75l-2.25-1.313M12 12.75V15" />
-                  </svg>
                   3D View
                 </button>
                 <button
                   type="button"
                   onClick={() => setMainTab('reports')}
                   className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                    mainTab === 'reports'
-                      ? 'bg-indigo-600 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
+                    mainTab === 'reports' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  <svg className="mr-1.5 inline h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
                   Reports
                 </button>
               </div>
@@ -427,63 +563,134 @@ export default function App() {
               uploads={uploads}
               surfaceVisible={surfaceVisible}
               onToggleSurface={handleToggleSurface}
+              domainStyles={domainStyles}
+              surfaceStyles={surfaceStyles}
+              onDomainStyleChange={handleDomainStyleChange}
+              onSurfaceStyleChange={handleSurfaceStyleChange}
             />
           )}
         </aside>
 
         {/* Main content */}
-        <main className="flex-1 overflow-hidden">
-          {result ? (
-            mainTab === 'reports' ? (
-              <ReportPanel
-                result={result}
-                mode={mode}
-                boundaries={boundaries}
-                comparisonName={comparisonName}
-                canvasRef={canvasRef}
-              />
-            ) : (
-              <div className="flex h-full flex-col">
-                <div className={crossSectionData ? 'h-[60%]' : 'h-full'} style={{ minHeight: 0 }}>
-                  <Viewer
-                    result={result}
-                    visible={visible}
-                    canvasRef={canvasRef}
-                    boundaries={boundaries}
-                    isDrawing={isDrawing}
-                    drawPoints={drawPoints}
-                    onAddDrawPoint={handleAddDrawPoint}
-                    uploads={uploads}
-                    surfaceVisible={surfaceVisible}
-                    isDrawingSection={isDrawingSection}
-                    sectionLine={sectionLine}
-                    onSectionLineChange={setSectionLine}
-                    onSectionDrawComplete={handleSectionDrawComplete}
-                  />
+        <main className="flex flex-1 overflow-hidden">
+          <div className="flex-1 overflow-hidden">
+            {result ? (
+              mainTab === 'reports' ? (
+                <ReportPanel
+                  result={result}
+                  mode={mode}
+                  boundaries={boundaries}
+                  comparisonName={comparisonName}
+                  canvasRef={canvasRef}
+                />
+              ) : (
+                <div className="flex h-full flex-col">
+                  <div className={crossSectionData ? 'h-[60%]' : 'h-full'} style={{ minHeight: 0 }}>
+                    <Viewer
+                      ref={viewerRef}
+                      result={result}
+                      visible={visible}
+                      canvasRef={canvasRef}
+                      boundaries={boundaries}
+                      isDrawing={isDrawing}
+                      drawPoints={drawPoints}
+                      onAddDrawPoint={handleAddDrawPoint}
+                      uploads={uploads}
+                      surfaceVisible={surfaceVisible}
+                      isDrawingSection={isDrawingSection}
+                      sectionLine={sectionLine}
+                      onSectionLineChange={setSectionLine}
+                      onSectionDrawComplete={handleSectionDrawComplete}
+                      background={background}
+                      domainStyles={domainStyles}
+                      surfaceStyles={surfaceStyles}
+                      selectedId={selectedId}
+                      onSelect={handleSelect}
+                      measureTool={measureTool}
+                      measurePoints={measurePoints}
+                      onAddMeasurePoint={handleAddMeasurePoint}
+                    />
+                  </div>
+                  {crossSectionData && (
+                    <div className="h-[40%] border-t border-slate-600" style={{ minHeight: 0 }}>
+                      <CrossSectionPanel data={crossSectionData} onClose={handleClearSection} />
+                    </div>
+                  )}
                 </div>
-                {crossSectionData && (
-                  <div className="h-[40%] border-t border-slate-600" style={{ minHeight: 0 }}>
-                    <CrossSectionPanel data={crossSectionData} onClose={handleClearSection} />
+              )
+            ) : (
+              <div className="flex h-full items-center justify-center bg-slate-900">
+                <div className="text-center">
+                  <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-800">
+                    <svg className="h-8 w-8 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-2.25-1.313M21 7.5v2.25m0-2.25l-2.25 1.313M3 7.5l2.25-1.313M3 7.5l2.25 1.313M3 7.5v2.25m9 3l2.25-1.313M12 12.75l-2.25-1.313M12 12.75V15m0 6.75l2.25-1.313M12 21.75V15m0 0l-2.25 1.313M3 16.5v-2.25m0 0l2.25 1.313M3 14.25l2.25-1.313m11.25 1.313l2.25-1.313m0 0V16.5m0-2.25l2.25 1.313M21 14.25v2.25" />
+                    </svg>
+                  </div>
+                  <p className="text-sm font-medium text-slate-400">
+                    {allAssigned ? 'Ready to run — click "Run Conformance"' : 'Upload surfaces to get started'}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Assign all 5 surfaces, then run the conformance analysis
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Properties panel */}
+          {selectionInfo && mainTab === 'viewer' && (
+            <div className="flex w-56 flex-shrink-0 flex-col border-l border-slate-700 bg-slate-900 text-slate-200">
+              <div className="flex items-center justify-between border-b border-slate-700 px-3 py-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Properties</span>
+                <button
+                  type="button"
+                  onClick={() => { setSelectedId(null); setSelectionInfo(null); }}
+                  className="rounded p-0.5 text-slate-500 hover:bg-slate-800 hover:text-slate-300"
+                >
+                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-3 space-y-3">
+                <div>
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wide">Type</div>
+                  <div className="text-xs font-medium">{selectionInfo.type === 'domain' ? 'Conformance Solid' : 'Input Surface'}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wide">Name</div>
+                  <div className="text-xs font-medium">{selectionInfo.label}</div>
+                </div>
+                {selectionInfo.volume !== undefined && selectionInfo.volume > 0 && (
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Volume</div>
+                    <div className="text-xs font-mono">{formatVolume(selectionInfo.volume)} m³</div>
                   </div>
                 )}
-              </div>
-            )
-          ) : (
-            <div className="flex h-full items-center justify-center bg-slate-50">
-              <div className="text-center">
-                <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-200/60">
-                  <svg className="h-8 w-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-2.25-1.313M21 7.5v2.25m0-2.25l-2.25 1.313M3 7.5l2.25-1.313M3 7.5l2.25 1.313M3 7.5v2.25m9 3l2.25-1.313M12 12.75l-2.25-1.313M12 12.75V15m0 6.75l2.25-1.313M12 21.75V15m0 0l-2.25 1.313M3 16.5v-2.25m0 0l2.25 1.313M3 14.25l2.25-1.313m11.25 1.313l2.25-1.313m0 0V16.5m0-2.25l2.25 1.313M21 14.25v2.25" />
-                  </svg>
-                </div>
-                <p className="text-sm font-medium text-slate-600">
-                  {allAssigned
-                    ? 'Ready to run — click "Run Conformance" to start'
-                    : 'Upload surfaces to get started'}
-                </p>
-                <p className="mt-1 text-xs text-slate-400">
-                  Assign all 5 surfaces, then run the conformance analysis
-                </p>
+                {selectionInfo.blockName && (
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Block</div>
+                    <div className="text-xs font-medium">{selectionInfo.blockName}</div>
+                  </div>
+                )}
+                {selectionInfo.domain && (
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Domain</div>
+                    <div className="text-xs font-medium">{selectionInfo.domain}</div>
+                  </div>
+                )}
+                {selectionInfo.surfaceFileName && (
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">File</div>
+                    <div className="text-xs font-mono truncate">{selectionInfo.surfaceFileName}</div>
+                  </div>
+                )}
+                {selectionInfo.surfaceRole && (
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Role</div>
+                    <div className="text-xs font-medium">{selectionInfo.surfaceRole}</div>
+                  </div>
+                )}
               </div>
             </div>
           )}
