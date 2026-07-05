@@ -76,7 +76,7 @@ export default function ReportPanel({ result, mode, boundaries, comparisonName, 
           <input
             ref={templateInputRef}
             type="file"
-            accept=".pptx"
+            accept="*/*"
             onChange={handleTemplateChange}
             className="hidden"
           />

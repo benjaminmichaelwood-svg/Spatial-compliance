@@ -85,7 +85,7 @@ export default function BoundaryPanel({ boundaries, onChange, onStartDraw, isDra
       <input
         ref={fileRef}
         type="file"
-        accept=".dxf,.00t,.json"
+        accept="*/*"
         onChange={handleFile}
         className="hidden"
       />

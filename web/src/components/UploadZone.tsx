@@ -122,7 +122,7 @@ export default function UploadZone({ uploads, onUpdate, onLoadSample }: Props) {
                   if (el) fileInputRefs.current.set(key, el);
                 }}
                 type="file"
-                accept=".00t,.oot,.json"
+                accept="*/*"
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
