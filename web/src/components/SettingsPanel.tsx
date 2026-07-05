@@ -15,27 +15,6 @@ export default function SettingsPanel({ settings, onChange }: Props) {
 
       <div className="space-y-3">
         <div>
-          <div className="mb-1 flex items-center justify-between">
-            <label className="text-xs text-slate-400">Grid Resolution</label>
-            <span className="font-mono text-xs text-slate-300">
-              {settings.resolution}
-            </span>
-          </div>
-          <input
-            type="range"
-            min={5}
-            max={100}
-            step={5}
-            value={settings.resolution}
-            onChange={(e) => update({ resolution: +e.target.value })}
-            className="h-1 w-full cursor-pointer appearance-none rounded-full bg-slate-700
-                       accent-indigo-500 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3
-                       [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full
-                       [&::-webkit-slider-thumb]:bg-indigo-500"
-          />
-        </div>
-
-        <div>
           <label className="mb-1 block text-xs text-slate-400">
             Min Volume (m³)
           </label>

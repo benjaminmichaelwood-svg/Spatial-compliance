@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::bvh::SurfaceBvh;
 use crate::boundary::assign_cell_to_boundary;
 use crate::cutfill::SliverFilter;
 use crate::solid::{avg_thickness, compute_signed_volume, compute_surface_area};
@@ -111,19 +112,17 @@ pub struct ConformanceInput<'a> {
     pub schedule_end: &'a TriSurface,
     pub schedule_future: &'a TriSurface,
     pub mode: Mode,
-    pub resolution: usize,
     pub filter: SliverFilter,
     pub boundaries: &'a [BoundaryRegion],
 }
 
 // ---------------------------------------------------------------------------
-// Mesh builder helper — constructs watertight prism columns
+// Mesh builder helper — constructs watertight triangular prisms
 // ---------------------------------------------------------------------------
 
 struct MeshBuilder {
     vertices: Vec<Vec3>,
     indices: Vec<[u32; 3]>,
-    grid_volume: f64,
 }
 
 impl MeshBuilder {
@@ -131,56 +130,37 @@ impl MeshBuilder {
         Self {
             vertices: Vec::new(),
             indices: Vec::new(),
-            grid_volume: 0.0,
         }
     }
 
-    fn add_prism(&mut self, x: f64, y: f64, cell_size: f64, z_upper: f64, z_lower: f64) {
-        if z_upper <= z_lower + 1e-9 {
+    fn add_tri_prism(&mut self, top: [Vec3; 3], bot_z: [f64; 3]) {
+        let z_diff_min = (top[0].z - bot_z[0])
+            .min(top[1].z - bot_z[1])
+            .min(top[2].z - bot_z[2]);
+        if z_diff_min <= 1e-9 {
             return;
         }
 
-        let half = cell_size / 2.0;
-        self.grid_volume += (z_upper - z_lower) * cell_size * cell_size;
-
         let base = self.vertices.len() as u32;
 
-        // Top quad (0-3), bottom quad (4-7)
-        let top = [
-            Vec3::new(x - half, y - half, z_upper),
-            Vec3::new(x + half, y - half, z_upper),
-            Vec3::new(x + half, y + half, z_upper),
-            Vec3::new(x - half, y + half, z_upper),
-        ];
-        let bot = [
-            Vec3::new(x - half, y - half, z_lower),
-            Vec3::new(x + half, y - half, z_lower),
-            Vec3::new(x + half, y + half, z_lower),
-            Vec3::new(x - half, y + half, z_lower),
-        ];
+        self.vertices.push(top[0]);
+        self.vertices.push(top[1]);
+        self.vertices.push(top[2]);
+        self.vertices.push(Vec3::new(top[0].x, top[0].y, bot_z[0]));
+        self.vertices.push(Vec3::new(top[1].x, top[1].y, bot_z[1]));
+        self.vertices.push(Vec3::new(top[2].x, top[2].y, bot_z[2]));
 
-        for v in &top {
-            self.vertices.push(*v);
-        }
-        for v in &bot {
-            self.vertices.push(*v);
-        }
-
-        // Top face (outward normal +z)
+        // Top face
         self.indices.push([base, base + 1, base + 2]);
-        self.indices.push([base, base + 2, base + 3]);
-
-        // Bottom face (outward normal -z)
-        self.indices.push([base + 4, base + 6, base + 5]);
-        self.indices.push([base + 4, base + 7, base + 6]);
-
-        // Side faces (outward normals)
-        let sides: [(u32, u32); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
+        // Bottom face
+        self.indices.push([base + 3, base + 5, base + 4]);
+        // Side faces
+        let sides: [(u32, u32); 3] = [(0, 1), (1, 2), (2, 0)];
         for &(a, b) in &sides {
             let ta = base + a;
             let tb = base + b;
-            let ba = base + 4 + a;
-            let bb = base + 4 + b;
+            let ba = base + 3 + a;
+            let bb = base + 3 + b;
             self.indices.push([ta, bb, tb]);
             self.indices.push([ta, ba, bb]);
         }
@@ -203,51 +183,15 @@ impl MeshBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// Surface interpolation (same algorithm as solid.rs, extracted here so we can
-// sample all five surfaces on one shared grid)
+// Per-cell domain classification (reused from original — these work on Z values)
 // ---------------------------------------------------------------------------
 
-fn interpolate_z(surface: &TriSurface, x: f64, y: f64) -> Option<f64> {
-    for idx in &surface.indices {
-        let v0 = surface.vertices[idx[0] as usize];
-        let v1 = surface.vertices[idx[1] as usize];
-        let v2 = surface.vertices[idx[2] as usize];
-
-        let d = (v1.y - v2.y) * (v0.x - v2.x) + (v2.x - v1.x) * (v0.y - v2.y);
-        if d.abs() < 1e-12 {
-            continue;
-        }
-
-        let a = ((v1.y - v2.y) * (x - v2.x) + (v2.x - v1.x) * (y - v2.y)) / d;
-        let b = ((v2.y - v0.y) * (x - v2.x) + (v0.x - v2.x) * (y - v2.y)) / d;
-        let c = 1.0 - a - b;
-
-        if a >= -1e-8 && b >= -1e-8 && c >= -1e-8 {
-            return Some(a * v0.z + b * v1.z + c * v2.z);
-        }
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
-// Per-cell domain classification
-// ---------------------------------------------------------------------------
-
-/// A domain interval: the z-column that belongs to a particular domain at one
-/// grid cell.  `upper > lower` is guaranteed.
 struct Interval {
     domain: Domain,
     upper: f64,
     lower: f64,
 }
 
-/// Classify a single grid cell in **Dig** mode.
-///
-/// In a dig operation surfaces move DOWN (material removed).  The production
-/// start is higher than production end; the schedule start is higher than the
-/// schedule end.
-///
-/// Surface ordering (ideal):  PS ≥ PE,  SS ≥ SE ≥ SF
 fn classify_cell_dig(
     ps: f64,
     pe: f64,
@@ -258,10 +202,6 @@ fn classify_cell_dig(
     let mut out = Vec::with_capacity(4);
     let eps = 1e-9;
 
-    // --- Start-surface discrepancies ---
-
-    // Preschedule Delay: PS > SS — ground is higher than schedule assumed;
-    // prior scheduled mining was not completed.
     if ps > ss + eps {
         out.push(Interval {
             domain: Domain::PrescheduleDelay,
@@ -270,8 +210,6 @@ fn classify_cell_dig(
         });
     }
 
-    // Mined Before Start: PS < SS — ground is already lower than schedule
-    // assumed; mining occurred before this period.
     if ps < ss - eps {
         out.push(Interval {
             domain: Domain::MinedBeforeStart,
@@ -279,8 +217,6 @@ fn classify_cell_dig(
             lower: ps,
         });
     }
-
-    // --- Core overlap (Planned and Mined) ---
 
     let pam_upper = ps.min(ss);
     let pam_lower = pe.max(se);
@@ -291,8 +227,6 @@ fn classify_cell_dig(
             lower: pam_lower,
         });
     }
-
-    // --- Under-mining: PE > SE (actual is above scheduled end) ---
 
     if pe > se + eps {
         let pnm_upper = pe.min(ps.min(ss));
@@ -306,12 +240,9 @@ fn classify_cell_dig(
         }
     }
 
-    // --- Over-mining: PE < SE (actual is below scheduled end) ---
-
     if pe < se - eps {
         match sf {
             Some(sf_val) if sf_val < se => {
-                // Ahead of Plan: between SE and max(PE, SF)
                 let aop_lower = pe.max(sf_val);
                 if se > aop_lower + eps {
                     out.push(Interval {
@@ -320,8 +251,6 @@ fn classify_cell_dig(
                         lower: aop_lower,
                     });
                 }
-
-                // Mined Not Planned: below SF (mining past even the future plan)
                 if pe < sf_val - eps {
                     out.push(Interval {
                         domain: Domain::MinedNotPlanned,
@@ -331,7 +260,6 @@ fn classify_cell_dig(
                 }
             }
             _ => {
-                // No future schedule (or SF ≥ SE): all over-mining is unplanned
                 out.push(Interval {
                     domain: Domain::MinedNotPlanned,
                     upper: se,
@@ -344,13 +272,6 @@ fn classify_cell_dig(
     out
 }
 
-/// Classify a single grid cell in **Dump** mode.
-///
-/// In a dump operation surfaces move UP (material placed).  The production end
-/// is higher than production start; the schedule end is higher than the
-/// schedule start.
-///
-/// Surface ordering (ideal):  PE ≥ PS,  SF ≥ SE ≥ SS
 fn classify_cell_dump(
     ps: f64,
     pe: f64,
@@ -361,8 +282,6 @@ fn classify_cell_dump(
     let mut out = Vec::with_capacity(4);
     let eps = 1e-9;
 
-    // Dumped Before Start: PS > SS — material was already placed before this
-    // period beyond what the schedule assumed.
     if ps > ss + eps {
         out.push(Interval {
             domain: Domain::DumpedBeforeStart,
@@ -371,8 +290,6 @@ fn classify_cell_dump(
         });
     }
 
-    // Dump Preschedule Delay: PS < SS — less material placed than the schedule
-    // assumed from prior periods.
     if ps < ss - eps {
         out.push(Interval {
             domain: Domain::DumpPrescheduleDelay,
@@ -381,7 +298,6 @@ fn classify_cell_dump(
         });
     }
 
-    // Planned and Dumped: overlap of planned placement [SS,SE] and actual [PS,PE]
     let pad_lower = ps.max(ss);
     let pad_upper = pe.min(se);
     if pad_upper > pad_lower + eps {
@@ -392,7 +308,6 @@ fn classify_cell_dump(
         });
     }
 
-    // Under-dumping: PE < SE (didn't place as much as planned)
     if pe < se - eps {
         let pnd_lower = pe.max(ps.max(ss));
         let pnd_upper = se;
@@ -405,11 +320,9 @@ fn classify_cell_dump(
         }
     }
 
-    // Over-dumping: PE > SE (placed more than planned)
     if pe > se + eps {
         match sf {
             Some(sf_val) if sf_val > se => {
-                // Dumped Ahead of Plan: from SE up to min(PE, SF)
                 let aop_upper = pe.min(sf_val);
                 if aop_upper > se + eps {
                     out.push(Interval {
@@ -418,8 +331,6 @@ fn classify_cell_dump(
                         lower: se,
                     });
                 }
-
-                // Dumped Not Planned: above SF (placed beyond even future plan)
                 if pe > sf_val + eps {
                     out.push(Interval {
                         domain: Domain::DumpedNotPlanned,
@@ -429,7 +340,6 @@ fn classify_cell_dump(
                 }
             }
             _ => {
-                // No future schedule (or SF ≤ SE): all over-dumping is unplanned
                 out.push(Interval {
                     domain: Domain::DumpedNotPlanned,
                     upper: pe,
@@ -442,8 +352,6 @@ fn classify_cell_dump(
     out
 }
 
-/// Classify a cell where schedule surfaces are undefined but production shows
-/// activity.  All moved material is unplanned.
 fn classify_cell_no_schedule(ps: f64, pe: f64, mode: Mode) -> Vec<Interval> {
     let eps = 1e-9;
     match mode {
@@ -462,7 +370,7 @@ fn classify_cell_no_schedule(ps: f64, pe: f64, mode: Mode) -> Vec<Interval> {
 }
 
 // ---------------------------------------------------------------------------
-// Main classifier entry point
+// Main classifier entry point — mesh-based iteration via BVH
 // ---------------------------------------------------------------------------
 
 pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
@@ -474,65 +382,39 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
         input.schedule_future,
     ];
 
-    // Bounding box union of all surfaces
-    let mut min_x = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    for s in &surfaces {
-        let (lo, hi) = s.bounding_box();
-        min_x = min_x.min(lo.x);
-        min_y = min_y.min(lo.y);
-        max_x = max_x.max(hi.x);
-        max_y = max_y.max(hi.y);
-    }
-
-    let range_x = max_x - min_x;
-    let range_y = max_y - min_y;
-    if range_x <= 0.0 || range_y <= 0.0 {
-        return empty_result(input.mode);
-    }
-
-    let cell_size = range_x.max(range_y) / input.resolution as f64;
-    let nx = ((range_x / cell_size).ceil() as usize).max(1);
-    let ny = ((range_y / cell_size).ceil() as usize).max(1);
-
-    // Collect all domains that we might see
-    let dig_domains = [
-        Domain::PlannedAndMined,
-        Domain::PlannedNotMined,
-        Domain::MinedNotPlanned,
-        Domain::MinedBeforeStart,
-        Domain::PrescheduleDelay,
-        Domain::AheadOfPlan,
-    ];
-    let dump_domains = [
-        Domain::PlannedAndDumped,
-        Domain::PlannedNotDumped,
-        Domain::DumpedNotPlanned,
-        Domain::DumpedBeforeStart,
-        Domain::DumpPrescheduleDelay,
-        Domain::DumpedAheadOfPlan,
-    ];
-    let _active_domains = match input.mode {
-        Mode::Dig => &dig_domains[..],
-        Mode::Dump => &dump_domains[..],
-    };
-
-    use std::collections::HashMap;
+    // Build BVH for each surface
+    let bvhs: Vec<SurfaceBvh> = surfaces.iter().map(|s| SurfaceBvh::build(s)).collect();
 
     let has_boundaries = !input.boundaries.is_empty();
 
-    // Key: (domain, boundary_index) where None means no boundary or unassigned
+    use std::collections::HashMap;
     let mut builders: HashMap<(Domain, Option<usize>), MeshBuilder> = HashMap::new();
 
-    // Iterate grid cells — sample all 5 surfaces at each cell centre
-    for iy in 0..ny {
-        for ix in 0..nx {
-            let cx = min_x + (ix as f64 + 0.5) * cell_size;
-            let cy = min_y + (iy as f64 + 0.5) * cell_size;
+    // Iterate triangles from ALL surfaces, starting with the most finely
+    // tessellated. For each surface, iterate its triangles and sample all 5
+    // surfaces at the centroid via BVH. Skip triangles whose centroid is
+    // already covered by a surface iterated earlier (to avoid double-counting).
+    let mut surface_order: Vec<usize> = (0..5).collect();
+    surface_order.sort_by(|&a, &b| surfaces[b].num_triangles().cmp(&surfaces[a].num_triangles()));
 
-            // If boundaries are defined, skip cells outside all boundaries
+    let mut processed_surfaces: Vec<usize> = Vec::new();
+
+    for &si in &surface_order {
+        let ref_surface = surfaces[si];
+
+        for ti in 0..ref_surface.num_triangles() {
+            let tri = ref_surface.triangle(ti);
+            let cx = (tri.v0.x + tri.v1.x + tri.v2.x) / 3.0;
+            let cy = (tri.v0.y + tri.v1.y + tri.v2.y) / 3.0;
+
+            // Skip if a previously-iterated surface already covers this centroid
+            let already_covered = processed_surfaces
+                .iter()
+                .any(|&prev_si| bvhs[prev_si].interpolate_z(cx, cy).is_some());
+            if already_covered {
+                continue;
+            }
+
             let block_idx = if has_boundaries {
                 match assign_cell_to_boundary(cx, cy, input.boundaries) {
                     Some(idx) => Some(idx),
@@ -542,7 +424,16 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
                 None
             };
 
-            let zs: Vec<Option<f64>> = surfaces.iter().map(|s| interpolate_z(s, cx, cy)).collect();
+            let zs: Vec<Option<f64>> = (0..5)
+                .map(|i| {
+                    if i == si {
+                        Some((tri.v0.z + tri.v1.z + tri.v2.z) / 3.0)
+                    } else {
+                        bvhs[i].interpolate_z(cx, cy)
+                    }
+                })
+                .collect();
+
             let (ps, pe) = match (zs[0], zs[1]) {
                 (Some(a), Some(b)) => (a, b),
                 _ => continue,
@@ -559,14 +450,30 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
                 _ => classify_cell_no_schedule(ps, pe, input.mode),
             };
 
+            let tri_area_2d = ((tri.v1.x - tri.v0.x) * (tri.v2.y - tri.v0.y)
+                - (tri.v1.y - tri.v0.y) * (tri.v2.x - tri.v0.x))
+                .abs()
+                * 0.5;
+            if tri_area_2d < 1e-12 {
+                continue;
+            }
+
             for iv in &intervals {
                 let key = (iv.domain, block_idx);
+                let top = [
+                    Vec3::new(tri.v0.x, tri.v0.y, iv.upper),
+                    Vec3::new(tri.v1.x, tri.v1.y, iv.upper),
+                    Vec3::new(tri.v2.x, tri.v2.y, iv.upper),
+                ];
+                let bot_z = [iv.lower, iv.lower, iv.lower];
                 builders
                     .entry(key)
                     .or_insert_with(MeshBuilder::new)
-                    .add_prism(cx, cy, cell_size, iv.upper, iv.lower);
+                    .add_tri_prism(top, bot_z);
             }
         }
+
+        processed_surfaces.push(si);
     }
 
     // Convert builders into DomainSolids, applying the sliver filter
@@ -660,7 +567,6 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
         dv.into_iter().collect()
     };
 
-    // Block-level summaries
     let block_summaries = if has_boundaries {
         let mut block_map: HashMap<String, HashMap<String, f64>> = HashMap::new();
         for d in &domains {
@@ -701,20 +607,6 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
     }
 }
 
-fn empty_result(mode: Mode) -> ConformanceResult {
-    ConformanceResult {
-        mode,
-        domains: vec![],
-        summary: ConformanceSummary {
-            total_planned_volume: 0.0,
-            total_actual_volume: 0.0,
-            conformance_volume: 0.0,
-            conformance_percent: 0.0,
-            domain_volumes: vec![],
-            block_summaries: vec![],
-        },
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -724,7 +616,6 @@ fn empty_result(mode: Mode) -> ConformanceResult {
 mod tests {
     use super::*;
 
-    /// Helper: flat surface covering [0, size] × [0, size] at elevation `z`.
     fn flat(z: f64, name: &str, size: f64) -> TriSurface {
         TriSurface {
             name: name.to_string(),
@@ -753,7 +644,6 @@ mod tests {
             schedule_end: se,
             schedule_future: sf,
             mode,
-            resolution: 40,
             filter: SliverFilter {
                 min_volume_m3: 0.01,
                 min_thickness_m: 0.001,
@@ -776,7 +666,7 @@ mod tests {
     }
 
     fn assert_vol(actual: f64, expected: f64, label: &str) {
-        let tol = expected.abs() * 0.06 + 1.0; // 6% + 1 m³ absolute
+        let tol = expected.abs() * 0.06 + 1.0;
         assert!(
             (actual - expected).abs() < tol,
             "{label}: expected ~{expected:.1}, got {actual:.1}"
@@ -789,8 +679,6 @@ mod tests {
 
     #[test]
     fn dig_perfect_conformance() {
-        // Schedule and production are identical: all Planned and Mined
-        // PS=SS=100, PE=SE=90, SF=80.  Area 10×10, height 10 → 1000 m³.
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(90.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -814,10 +702,6 @@ mod tests {
 
     #[test]
     fn dig_planned_not_mined() {
-        // Plan says dig 20 m, actual only digs 10 m.
-        // PS=SS=100, PE=90, SE=80, SF=70.
-        // PAM = [max(90,80), min(100,100)] = [90,100] = 1000 m³
-        // PNM = [80, 90] = 1000 m³
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(90.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -834,10 +718,6 @@ mod tests {
 
     #[test]
     fn dig_ahead_of_plan() {
-        // Actual digs 10 m past plan, within future schedule.
-        // PS=SS=100, PE=70, SE=80, SF=60.
-        // PAM = [max(70,80)=80, 100] = 2000 m³
-        // AOP = [max(70,60)=70, 80] = 1000 m³
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(70.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -854,11 +734,6 @@ mod tests {
 
     #[test]
     fn dig_mined_not_planned() {
-        // Actual digs past future schedule — truly unplanned.
-        // PS=SS=100, PE=50, SE=80, SF=60.
-        // PAM = [80, 100] = 2000 m³
-        // AOP = [60, 80] = 2000 m³
-        // MNP = [50, 60] = 1000 m³
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(50.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -874,11 +749,6 @@ mod tests {
 
     #[test]
     fn dig_preschedule_delay() {
-        // Ground is 5 m higher than schedule assumed (prior plan not done).
-        // PS=105, PE=90, SS=100, SE=80, SF=70.
-        // PD  = [100, 105] = 500 m³
-        // PAM = [min(105,100)=100, max(90,80)=90] = [90,100] = 1000 m³
-        // PNM = [80, min(90,100)=90] = 1000 m³
         let ps = flat(105.0, "ps", 10.0);
         let pe = flat(90.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -894,10 +764,6 @@ mod tests {
 
     #[test]
     fn dig_mined_before_start() {
-        // Ground is 10 m lower than schedule assumed (prior mining occurred).
-        // PS=90, PE=80, SS=100, SE=80, SF=70.
-        // MBS = [90, 100] = 1000 m³
-        // PAM = [min(90,100)=90, max(80,80)=80] = [80,90] = 1000 m³
         let ps = flat(90.0, "ps", 10.0);
         let pe = flat(80.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -913,10 +779,6 @@ mod tests {
 
     #[test]
     fn dig_combined_preschedule_delay_and_planned_not_mined() {
-        // PS=100, PE=85, SS=95, SE=80, SF=70.
-        // PD  = [95, 100] = 500 m³  (prior plan incomplete)
-        // PAM = [min(100,95)=95, max(85,80)=85] = [85, 95] = 1000 m³
-        // PNM = [80, min(85,95)=85] = 500 m³
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(85.0, "pe", 10.0);
         let ss = flat(95.0, "ss", 10.0);
@@ -932,70 +794,51 @@ mod tests {
 
     #[test]
     fn dig_all_six_domains() {
-        // Construct a scenario that triggers all 6 domains simultaneously by
-        // using a tilted PE surface that crosses SE at mid-span.
-        //
-        // Left half (x < 5):  PE = 70 (over-mined past SF=65)
-        // Right half (x ≥ 5): PE = 95 (under-mined)
-        // PS=105 (preschedule delay), SS=100, SE=80, SF=65.
-        //
-        // We use a tilted PE: z = 95 − 5x  (at x=0: z=95, at x=10: z=45)
-        // Wait, that's too aggressive. Let me use a gentler tilt.
-        //
-        // Actually, let me just use a moderately tilted PE to get all domains.
-        // PS=105, SS=100, SE=80, SF=65.
-        // PE tilted: z = 100 - 6x (x=0: z=100, x=10: z=40)
-        //
-        // At x=0 (pe=100): pe > se (100>80), pe > ss (100=100):
-        //   PD=[100,105]=5, no PAM (pam_upper=100, pam_lower=max(100,80)=100 → 0)
-        //   PNM=[80,100]=20
-        //
-        // At x=5 (pe=70): pe < se (70<80), pe > sf (70>65):
-        //   PD=[100,105]=5, PAM=[80,100]=20, AOP=[70,80]=10
-        //
-        // At x=10 (pe=40): pe < sf (40<65):
-        //   PD=[100,105]=5, PAM=[80,100]=20, AOP=[65,80]=15, MNP=[40,65]=25
-        //
-        // This gives PD, PAM, PNM, AOP, MNP. Still missing MBS.
-        // To get MBS we'd need PS < SS at some cells. Let me tilt PS too.
-        //
-        // Actually, let me keep it simpler. I'll just verify that each domain
-        // appears at least once and the volumes are positive. A full analytical
-        // check of a tilted-surface scenario is fragile. The per-domain tests
-        // above already validate the volumes precisely.
-
+        // Use a subdivided PE surface so centroids span the full Z range.
+        // PE tilted: z = 95 - 4x across [0,20].
+        // Centroids at x≈3.33 (pe≈81.67), x≈6.67 (pe≈68.33), etc.
+        // With se=60 and sf=35:
+        //   pe>se at left centroids → PNM
+        //   pe<se at right centroids → AOP/MNP
+        //   ps>ss everywhere → PD
         let size = 20.0;
         let ps = flat(105.0, "ps", size);
         let ss = flat(100.0, "ss", size);
-        let se = flat(80.0, "se", size);
-        let sf = flat(65.0, "sf", size);
+        let se = flat(60.0, "se", size);
+        let sf = flat(35.0, "sf", size);
 
-        // Tilted PE: z = 95 - 4x  (x=0 → 95, x=20 → 15)
+        // Subdivide PE into a strip mesh for finer sampling
+        let n = 10;
+        let mut pe_verts = Vec::new();
+        let mut pe_indices = Vec::new();
+        for i in 0..=n {
+            let x = size * i as f64 / n as f64;
+            let z = 95.0 - 4.0 * x;
+            pe_verts.push(Vec3::new(x, 0.0, z));
+            pe_verts.push(Vec3::new(x, size, z));
+        }
+        for i in 0..n {
+            let bl = (i * 2) as u32;
+            let br = bl + 2;
+            let tl = bl + 1;
+            let tr = bl + 3;
+            pe_indices.push([bl, br, tr]);
+            pe_indices.push([bl, tr, tl]);
+        }
         let pe = TriSurface {
             name: "pe".into(),
-            vertices: vec![
-                Vec3::new(0.0, 0.0, 95.0),
-                Vec3::new(size, 0.0, 15.0),
-                Vec3::new(size, size, 15.0),
-                Vec3::new(0.0, size, 95.0),
-            ],
-            indices: vec![[0, 1, 2], [0, 2, 3]],
+            vertices: pe_verts,
+            indices: pe_indices,
         };
 
         let r = run(&ps, &pe, &ss, &se, &sf, Mode::Dig);
 
-        // PD present (ps=105 > ss=100 everywhere)
         assert!(has_domain(&r, Domain::PrescheduleDelay), "Expected PD");
-        // PAM present (overlap zone exists)
         assert!(has_domain(&r, Domain::PlannedAndMined), "Expected PAM");
-        // PNM present (right side where pe > se)
         assert!(has_domain(&r, Domain::PlannedNotMined), "Expected PNM");
-        // AOP present (pe < se but pe > sf in middle)
         assert!(has_domain(&r, Domain::AheadOfPlan), "Expected AOP");
-        // MNP present (far right where pe < sf)
         assert!(has_domain(&r, Domain::MinedNotPlanned), "Expected MNP");
 
-        // All volumes positive
         for d in &r.domains {
             assert!(d.volume > 0.0, "Domain {:?} volume should be > 0", d.domain);
         }
@@ -1003,10 +846,6 @@ mod tests {
 
     #[test]
     fn dig_volume_partitioning() {
-        // Verify that domain volumes sum to the total volume between the
-        // outermost surfaces.
-        // PS=100, PE=80, SS=100, SE=80, SF=70. Area = 10×10.
-        // Everything is PAM = 2000 m³. No other domains.
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(80.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -1039,8 +878,6 @@ mod tests {
 
     #[test]
     fn dump_perfect_conformance() {
-        // Dump 10 m as planned.
-        // PS=SS=100, PE=SE=110, SF=120.
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(110.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -1056,10 +893,6 @@ mod tests {
 
     #[test]
     fn dump_planned_not_dumped() {
-        // Plan says place 20 m, actual only places 10 m.
-        // PS=SS=100, PE=110, SE=120, SF=130.
-        // PAD = [max(100,100), min(110,120)] = [100,110] = 1000 m³
-        // PND = [max(110,100), 120] = [110, 120] = 1000 m³
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(110.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -1074,10 +907,6 @@ mod tests {
 
     #[test]
     fn dump_ahead_of_plan() {
-        // Actual dumps 10 m past current plan, within future schedule.
-        // PS=SS=100, PE=120, SE=110, SF=130.
-        // PAD = [100, 110] = 1000 m³
-        // DAoP = [110, 120] = 1000 m³
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(120.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -1092,11 +921,6 @@ mod tests {
 
     #[test]
     fn dump_not_planned() {
-        // Actual dumps past future schedule.
-        // PS=SS=100, PE=140, SE=110, SF=130.
-        // PAD = [100, 110] = 1000 m³
-        // DAoP = [110, 130] = 2000 m³
-        // DNP = [130, 140] = 1000 m³
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(140.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -1112,10 +936,6 @@ mod tests {
 
     #[test]
     fn dump_preschedule_delay() {
-        // Less material placed before this period than schedule assumed.
-        // PS=95, SS=100, PE=110, SE=110, SF=120.
-        // DPD = [95, 100] = 500 m³
-        // PAD = [max(95,100)=100, min(110,110)=110] = [100,110] = 1000 m³
         let ps = flat(95.0, "ps", 10.0);
         let pe = flat(110.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -1130,10 +950,6 @@ mod tests {
 
     #[test]
     fn dump_before_start() {
-        // More material placed before this period than schedule assumed.
-        // PS=110, SS=100, PE=120, SE=120, SF=130.
-        // DBS = [100, 110] = 1000 m³
-        // PAD = [max(110,100)=110, min(120,120)=120] = [110,120] = 1000 m³
         let ps = flat(110.0, "ps", 10.0);
         let pe = flat(120.0, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -1152,7 +968,6 @@ mod tests {
 
     #[test]
     fn sliver_filter_removes_thin_domains() {
-        // Only 0.01 m of dig — should be filtered.
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(99.99, "pe", 10.0);
         let ss = flat(100.0, "ss", 10.0);
@@ -1166,7 +981,6 @@ mod tests {
             schedule_end: &se,
             schedule_future: &sf,
             mode: Mode::Dig,
-            resolution: 20,
             filter: SliverFilter {
                 min_volume_m3: 0.5,
                 min_thickness_m: 0.05,
@@ -1182,7 +996,6 @@ mod tests {
 
     #[test]
     fn solids_are_watertight() {
-        // Verify that each solid mesh has consistent signed volume (positive)
         let ps = flat(100.0, "ps", 10.0);
         let pe = flat(85.0, "pe", 10.0);
         let ss = flat(95.0, "ss", 10.0);
@@ -1227,7 +1040,6 @@ mod tests {
             schedule_end: &se,
             schedule_future: &sf,
             mode: Mode::Dig,
-            resolution: 40,
             filter: SliverFilter {
                 min_volume_m3: 0.01,
                 min_thickness_m: 0.001,
@@ -1248,7 +1060,6 @@ mod tests {
             .map(|d| d.volume)
             .sum();
 
-        // Total should be ~4000 m³ (20x20 area × 10m height)
         let total = left_vol + right_vol;
         assert!(
             (total - 4000.0).abs() < 200.0,
@@ -1259,7 +1070,6 @@ mod tests {
             "Volumes should be roughly equal: left={left_vol}, right={right_vol}"
         );
 
-        // Block summaries should exist
         assert_eq!(r.summary.block_summaries.len(), 2);
     }
 

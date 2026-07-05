@@ -214,8 +214,8 @@ export default function App() {
 
       const res =
         boundaries.length > 0
-          ? runConformanceWithBoundaries(surfaces, mode, settings.resolution, settings.minVolume, settings.minThickness, boundaries)
-          : runConformance(surfaces, mode, settings.resolution, settings.minVolume, settings.minThickness);
+          ? runConformanceWithBoundaries(surfaces, mode, settings.minVolume, settings.minThickness, boundaries)
+          : runConformance(surfaces, mode, settings.minVolume, settings.minThickness);
 
       setResult(res);
       setVisible(new Set(res.domains.map((d) => d.domain)));

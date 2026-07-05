@@ -1,140 +1,70 @@
+use crate::bvh::SurfaceBvh;
 use crate::types::{SolidMesh, TriSurface, Vec3};
 
-/// Interpolate Z on a triangle surface at point (x, y).
-/// Uses barycentric coordinates for each triangle.
-fn interpolate_z(surface: &TriSurface, x: f64, y: f64) -> Option<f64> {
-    for idx in &surface.indices {
-        let v0 = surface.vertices[idx[0] as usize];
-        let v1 = surface.vertices[idx[1] as usize];
-        let v2 = surface.vertices[idx[2] as usize];
-
-        let d = (v1.y - v2.y) * (v0.x - v2.x) + (v2.x - v1.x) * (v0.y - v2.y);
-        if d.abs() < 1e-12 {
-            continue;
-        }
-
-        let a = ((v1.y - v2.y) * (x - v2.x) + (v2.x - v1.x) * (y - v2.y)) / d;
-        let b = ((v2.y - v0.y) * (x - v2.x) + (v0.x - v2.x) * (y - v2.y)) / d;
-        let c = 1.0 - a - b;
-
-        if a >= -1e-8 && b >= -1e-8 && c >= -1e-8 {
-            return Some(a * v0.z + b * v1.z + c * v2.z);
-        }
-    }
-    None
-}
-
-/// Build closed solid meshes between two surfaces using a grid sampling approach.
+/// Build closed solid meshes between two surfaces using direct mesh-on-mesh computation.
 ///
-/// For each grid cell where both surfaces are defined, we create a hexahedral
-/// prism (top quad from upper surface, bottom quad from lower surface, four side
-/// quads) triangulated into the solid mesh. The result is a watertight mesh whose
-/// signed volume equals the material between the surfaces.
+/// Iterates triangles of the upper surface. For each triangle, interpolates the
+/// lower surface Z at the three vertices using a BVH. If all three are valid and
+/// upper > lower, a triangular prism (6 vertices, 8 triangles) is emitted.
+///
+/// Then repeats with the lower surface as reference and the upper as the lookup
+/// target, catching any footprint regions that only the lower surface covers.
 pub fn build_solid_between_surfaces(
     upper: &TriSurface,
     lower: &TriSurface,
     label: &str,
-    resolution: usize,
 ) -> Option<SolidMesh> {
-    let (u_min, u_max) = upper.bounding_box();
-    let (l_min, l_max) = lower.bounding_box();
-
-    let min_x = u_min.x.max(l_min.x);
-    let max_x = u_max.x.min(l_max.x);
-    let min_y = u_min.y.max(l_min.y);
-    let max_y = u_max.y.min(l_max.y);
-
-    if min_x >= max_x || min_y >= max_y {
-        return None;
-    }
-
-    let range_x = max_x - min_x;
-    let range_y = max_y - min_y;
-    let cell_size = range_x.max(range_y) / resolution as f64;
-    let nx = ((range_x / cell_size).ceil() as usize).max(1);
-    let ny = ((range_y / cell_size).ceil() as usize).max(1);
-
-    // Sample Z values on a grid for both surfaces
-    let grid_w = nx + 1;
-    let grid_h = ny + 1;
-    let mut upper_z = vec![None; grid_w * grid_h];
-    let mut lower_z = vec![None; grid_w * grid_h];
-
-    for iy in 0..grid_h {
-        for ix in 0..grid_w {
-            let x = min_x + ix as f64 * cell_size;
-            let y = min_y + iy as f64 * cell_size;
-            let gi = iy * grid_w + ix;
-            upper_z[gi] = interpolate_z(upper, x, y);
-            lower_z[gi] = interpolate_z(lower, x, y);
-        }
-    }
+    let lower_bvh = SurfaceBvh::build(lower);
+    let upper_bvh = SurfaceBvh::build(upper);
 
     let mut vertices: Vec<Vec3> = Vec::new();
     let mut indices: Vec<[u32; 3]> = Vec::new();
 
-    // For each grid cell, if all four corners have valid Z on both surfaces
-    // and upper > lower at all corners, emit a closed prism.
-    for iy in 0..ny {
-        for ix in 0..nx {
-            let corners = [
-                iy * grid_w + ix,
-                iy * grid_w + ix + 1,
-                (iy + 1) * grid_w + ix + 1,
-                (iy + 1) * grid_w + ix,
-            ];
+    // Pass 1: iterate upper triangles, look up lower Z
+    for ti in 0..upper.num_triangles() {
+        let tri = upper.triangle(ti);
+        let lz0 = lower_bvh.interpolate_z(tri.v0.x, tri.v0.y);
+        let lz1 = lower_bvh.interpolate_z(tri.v1.x, tri.v1.y);
+        let lz2 = lower_bvh.interpolate_z(tri.v2.x, tri.v2.y);
 
-            let mut valid = true;
-            let mut top = [Vec3::new(0.0, 0.0, 0.0); 4];
-            let mut bot = [Vec3::new(0.0, 0.0, 0.0); 4];
-
-            for (ci, &gi) in corners.iter().enumerate() {
-                let ux = min_x + (gi % grid_w) as f64 * cell_size;
-                let uy = min_y + (gi / grid_w) as f64 * cell_size;
-
-                match (upper_z[gi], lower_z[gi]) {
-                    (Some(uz), Some(lz)) if uz > lz + 1e-9 => {
-                        top[ci] = Vec3::new(ux, uy, uz);
-                        bot[ci] = Vec3::new(ux, uy, lz);
-                    }
-                    _ => {
-                        valid = false;
-                        break;
-                    }
-                }
+        if let (Some(l0), Some(l1), Some(l2)) = (lz0, lz1, lz2) {
+            // At least one vertex must have upper > lower
+            if tri.v0.z > l0 + 1e-9 || tri.v1.z > l1 + 1e-9 || tri.v2.z > l2 + 1e-9 {
+                // Clamp: where upper <= lower, collapse to zero thickness
+                let top = [tri.v0, tri.v1, tri.v2];
+                let bot = [
+                    l0.min(tri.v0.z),
+                    l1.min(tri.v1.z),
+                    l2.min(tri.v2.z),
+                ];
+                add_tri_prism(&mut vertices, &mut indices, top, bot);
             }
+        }
+    }
 
-            if !valid {
-                continue;
-            }
+    // Pass 2: iterate lower triangles, add prisms for areas lower covers but upper doesn't
+    for ti in 0..lower.num_triangles() {
+        let tri = lower.triangle(ti);
+        let cx = (tri.v0.x + tri.v1.x + tri.v2.x) / 3.0;
+        let cy = (tri.v0.y + tri.v1.y + tri.v2.y) / 3.0;
 
-            let base = vertices.len() as u32;
+        if upper_bvh.interpolate_z(cx, cy).is_some() {
+            continue;
+        }
 
-            // Vertices: 0-3 = top quad, 4-7 = bottom quad
-            for v in &top {
-                vertices.push(*v);
-            }
-            for v in &bot {
-                vertices.push(*v);
-            }
+        let uz0 = upper_bvh.interpolate_z(tri.v0.x, tri.v0.y);
+        let uz1 = upper_bvh.interpolate_z(tri.v1.x, tri.v1.y);
+        let uz2 = upper_bvh.interpolate_z(tri.v2.x, tri.v2.y);
 
-            // Top face (CCW when viewed from above = outward normal up)
-            indices.push([base, base + 1, base + 2]);
-            indices.push([base, base + 2, base + 3]);
-
-            // Bottom face (CW when viewed from above = outward normal down)
-            indices.push([base + 4, base + 6, base + 5]);
-            indices.push([base + 4, base + 7, base + 6]);
-
-            // Side faces — winding reversed so outward normals point away from the prism
-            let sides: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
-            for &(a, b) in &sides {
-                let ta = base + a as u32;
-                let tb = base + b as u32;
-                let ba = base + 4 + a as u32;
-                let bb = base + 4 + b as u32;
-                indices.push([ta, bb, tb]);
-                indices.push([ta, ba, bb]);
+        if let (Some(u0), Some(u1), Some(u2)) = (uz0, uz1, uz2) {
+            if u0 > tri.v0.z + 1e-9 || u1 > tri.v1.z + 1e-9 || u2 > tri.v2.z + 1e-9 {
+                let top = [
+                    Vec3::new(tri.v0.x, tri.v0.y, u0.max(tri.v0.z)),
+                    Vec3::new(tri.v1.x, tri.v1.y, u1.max(tri.v1.z)),
+                    Vec3::new(tri.v2.x, tri.v2.y, u2.max(tri.v2.z)),
+                ];
+                let bot = [tri.v0.z, tri.v1.z, tri.v2.z];
+                add_tri_prism(&mut vertices, &mut indices, top, bot);
             }
         }
     }
@@ -155,8 +85,45 @@ pub fn build_solid_between_surfaces(
     })
 }
 
+/// Add a triangular prism between a top triangle and a bottom triangle.
+/// top_z and bot_z are the Z values at the three XY positions.
+/// The top triangle vertices define the XY positions.
+fn add_tri_prism(
+    vertices: &mut Vec<Vec3>,
+    indices: &mut Vec<[u32; 3]>,
+    top: [Vec3; 3],
+    bot_z: [f64; 3],
+) {
+    let base = vertices.len() as u32;
+
+    // Top vertices (0, 1, 2)
+    vertices.push(top[0]);
+    vertices.push(top[1]);
+    vertices.push(top[2]);
+    // Bottom vertices (3, 4, 5)
+    vertices.push(Vec3::new(top[0].x, top[0].y, bot_z[0]));
+    vertices.push(Vec3::new(top[1].x, top[1].y, bot_z[1]));
+    vertices.push(Vec3::new(top[2].x, top[2].y, bot_z[2]));
+
+    // Top face (outward normal up, CCW from above)
+    indices.push([base, base + 1, base + 2]);
+
+    // Bottom face (outward normal down, CW from above)
+    indices.push([base + 3, base + 5, base + 4]);
+
+    // Three side faces (two triangles each, outward normals)
+    let sides: [(u32, u32); 3] = [(0, 1), (1, 2), (2, 0)];
+    for &(a, b) in &sides {
+        let ta = base + a;
+        let tb = base + b;
+        let ba = base + 3 + a;
+        let bb = base + 3 + b;
+        indices.push([ta, bb, tb]);
+        indices.push([ta, ba, bb]);
+    }
+}
+
 /// Signed volume of a closed triangulated mesh using the divergence theorem.
-/// V = (1/6) * Σ (v0 · (v1 × v2)) for each triangle.
 pub fn compute_signed_volume(vertices: &[Vec3], indices: &[[u32; 3]]) -> f64 {
     let mut vol = 0.0;
     for tri in indices {
@@ -195,7 +162,6 @@ pub fn max_thickness(solid: &SolidMesh) -> f64 {
 }
 
 /// Compute average thickness = volume / footprint_area.
-/// Footprint area estimated from top-face triangles (those with upward-facing normals).
 pub fn avg_thickness(solid: &SolidMesh) -> f64 {
     if solid.volume < 1e-12 {
         return 0.0;
@@ -208,7 +174,6 @@ pub fn avg_thickness(solid: &SolidMesh) -> f64 {
         let v2 = solid.vertices[tri[2] as usize];
         let normal = (v1 - v0).cross(v2 - v0);
         if normal.z > 0.0 {
-            // Project onto XY plane for footprint area
             let area_2d = ((v1.x - v0.x) * (v2.y - v0.y) - (v1.y - v0.y) * (v2.x - v0.x)).abs()
                 * 0.5;
             footprint += area_2d;
@@ -244,9 +209,8 @@ mod tests {
         let upper = make_flat_surface(5.0, "upper");
         let lower = make_flat_surface(0.0, "lower");
 
-        let solid = build_solid_between_surfaces(&upper, &lower, "test", 10).unwrap();
+        let solid = build_solid_between_surfaces(&upper, &lower, "test").unwrap();
 
-        // 10x10 footprint, 5m height = 500 m³
         let expected = 500.0;
         let tolerance = expected * 0.05;
         assert!(
@@ -259,10 +223,8 @@ mod tests {
 
     #[test]
     fn tilted_upper_volume() {
-        // Lower: flat at z=0
         let lower = make_flat_surface(0.0, "lower");
 
-        // Upper: tilted plane z = 2 + 0.6*x (goes from z=2 at x=0 to z=8 at x=10)
         let upper = TriSurface {
             name: "tilted".into(),
             vertices: vec![
@@ -274,9 +236,8 @@ mod tests {
             indices: vec![[0, 1, 2], [0, 2, 3]],
         };
 
-        let solid = build_solid_between_surfaces(&upper, &lower, "test", 50).unwrap();
+        let solid = build_solid_between_surfaces(&upper, &lower, "test").unwrap();
 
-        // Average height = (2+8)/2 = 5, area = 100, volume = 500
         let expected = 500.0;
         let tolerance = expected * 0.05;
         assert!(
@@ -308,39 +269,32 @@ mod tests {
             indices: vec![[0, 1, 2]],
         };
 
-        assert!(build_solid_between_surfaces(&s1, &s2, "none", 10).is_none());
+        assert!(build_solid_between_surfaces(&s1, &s2, "none").is_none());
     }
 
     #[test]
     fn signed_volume_unit_cube() {
-        // Manually defined unit cube vertices and triangles (outward normals)
         let vertices = vec![
-            Vec3::new(0.0, 0.0, 0.0), // 0
-            Vec3::new(1.0, 0.0, 0.0), // 1
-            Vec3::new(1.0, 1.0, 0.0), // 2
-            Vec3::new(0.0, 1.0, 0.0), // 3
-            Vec3::new(0.0, 0.0, 1.0), // 4
-            Vec3::new(1.0, 0.0, 1.0), // 5
-            Vec3::new(1.0, 1.0, 1.0), // 6
-            Vec3::new(0.0, 1.0, 1.0), // 7
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(0.0, 1.0, 1.0),
         ];
         let indices: Vec<[u32; 3]> = vec![
-            // Bottom (z=0, normal -z)
             [0, 2, 1],
             [0, 3, 2],
-            // Top (z=1, normal +z)
             [4, 5, 6],
             [4, 6, 7],
-            // Front (y=0, normal -y)
             [0, 1, 5],
             [0, 5, 4],
-            // Back (y=1, normal +y)
             [2, 3, 7],
             [2, 7, 6],
-            // Left (x=0, normal -x)
             [0, 4, 7],
             [0, 7, 3],
-            // Right (x=1, normal +x)
             [1, 2, 6],
             [1, 6, 5],
         ];

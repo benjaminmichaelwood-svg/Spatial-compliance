@@ -26,7 +26,6 @@ pub fn encode_surface_pair(surface_a_json: &str, surface_b_json: &str) -> Result
 pub fn run_cut_fill(
     data_a: &[u8],
     data_b: &[u8],
-    resolution: u32,
     min_volume: f64,
     min_thickness: f64,
 ) -> Result<JsValue, JsValue> {
@@ -38,7 +37,7 @@ pub fn run_cut_fill(
         min_thickness_m: min_thickness,
     };
 
-    let result = compute_cut_fill(&a, &b, resolution as usize, filter);
+    let result = compute_cut_fill(&a, &b, filter);
 
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -47,7 +46,6 @@ pub fn run_cut_fill(
 pub fn run_cut_fill_from_json(
     surface_a_json: &str,
     surface_b_json: &str,
-    resolution: u32,
     min_volume: f64,
     min_thickness: f64,
 ) -> Result<JsValue, JsValue> {
@@ -61,7 +59,7 @@ pub fn run_cut_fill_from_json(
         min_thickness_m: min_thickness,
     };
 
-    let result = compute_cut_fill(&a, &b, resolution as usize, filter);
+    let result = compute_cut_fill(&a, &b, filter);
 
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -74,7 +72,6 @@ pub fn run_conformance(
     schedule_end_json: &str,
     schedule_future_json: &str,
     mode: &str,
-    resolution: u32,
     min_volume: f64,
     min_thickness: f64,
 ) -> Result<JsValue, JsValue> {
@@ -102,7 +99,6 @@ pub fn run_conformance(
         schedule_end: &se,
         schedule_future: &sf,
         mode,
-        resolution: resolution as usize,
         filter: SliverFilter {
             min_volume_m3: min_volume,
             min_thickness_m: min_thickness,
@@ -122,7 +118,6 @@ pub fn run_conformance_from_binary(
     sched_end_data: &[u8],
     sched_future_data: &[u8],
     mode: &str,
-    resolution: u32,
     min_volume: f64,
     min_thickness: f64,
 ) -> Result<JsValue, JsValue> {
@@ -145,7 +140,6 @@ pub fn run_conformance_from_binary(
         schedule_end: &se,
         schedule_future: &sf,
         mode,
-        resolution: resolution as usize,
         filter: SliverFilter {
             min_volume_m3: min_volume,
             min_thickness_m: min_thickness,
@@ -165,7 +159,6 @@ pub fn run_conformance_with_boundaries(
     schedule_end_json: &str,
     schedule_future_json: &str,
     mode: &str,
-    resolution: u32,
     min_volume: f64,
     min_thickness: f64,
     boundaries_json: &str,
@@ -197,7 +190,6 @@ pub fn run_conformance_with_boundaries(
         schedule_end: &se,
         schedule_future: &sf,
         mode,
-        resolution: resolution as usize,
         filter: SliverFilter {
             min_volume_m3: min_volume,
             min_thickness_m: min_thickness,

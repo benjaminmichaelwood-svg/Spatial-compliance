@@ -77,13 +77,11 @@ export interface UploadedSurface {
 }
 
 export interface Settings {
-  resolution: number;
   minVolume: number;
   minThickness: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  resolution: 40,
   minVolume: 1.0,
   minThickness: 0.1,
 };

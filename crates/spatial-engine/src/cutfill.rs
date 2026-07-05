@@ -2,7 +2,6 @@ use crate::intersect::{compute_intersection_polyline, chain_segments};
 use crate::solid::{avg_thickness, build_solid_between_surfaces};
 use crate::types::{CutFillResult, SolidMesh, TriSurface, Vec3};
 
-/// Filter parameters for removing sliver solids.
 #[derive(Debug, Clone, Copy)]
 pub struct SliverFilter {
     pub min_volume_m3: f64,
@@ -18,33 +17,18 @@ impl Default for SliverFilter {
     }
 }
 
-/// Full cut/fill pipeline:
-/// 1. Parse two surfaces (already done by caller).
-/// 2. Compute intersection polyline where surfaces cross.
-/// 3. Build closed solid meshes for cut (surface_a above surface_b) and
-///    fill (surface_b above surface_a) volumes.
-/// 4. Calculate volume of each solid.
-/// 5. Filter out slivers below minimum volume and thickness.
 pub fn compute_cut_fill(
     surface_a: &TriSurface,
     surface_b: &TriSurface,
-    resolution: usize,
     filter: SliverFilter,
 ) -> CutFillResult {
-    // Step 2: Intersection polyline
     let raw_segments = compute_intersection_polyline(surface_a, surface_b);
     let polylines = chain_segments(&raw_segments, 0.01);
-
     let intersection_polyline: Vec<Vec3> = polylines.into_iter().flatten().collect();
 
-    // Step 3 & 4: Build cut and fill solids
-    // Cut = where surface_a is above surface_b (material removed)
-    let cut_solid = build_solid_between_surfaces(surface_a, surface_b, "cut", resolution);
+    let cut_solid = build_solid_between_surfaces(surface_a, surface_b, "cut");
+    let fill_solid = build_solid_between_surfaces(surface_b, surface_a, "fill");
 
-    // Fill = where surface_b is above surface_a (material added)
-    let fill_solid = build_solid_between_surfaces(surface_b, surface_a, "fill", resolution);
-
-    // Step 5: Filter slivers
     let cut_solids = filter_slivers(cut_solid.into_iter().collect(), &filter);
     let fill_solids = filter_slivers(fill_solid.into_iter().collect(), &filter);
 
@@ -98,9 +82,8 @@ mod tests {
         let upper = flat_surface(5.0, "pre_mining");
         let lower = flat_surface(0.0, "mined");
 
-        let result = compute_cut_fill(&upper, &lower, 20, SliverFilter::default());
+        let result = compute_cut_fill(&upper, &lower, SliverFilter::default());
 
-        // 10x10 footprint, 5m cut = 500 m³
         assert!(
             (result.total_cut_volume - 500.0).abs() < 30.0,
             "Cut volume {} not near expected 500",
@@ -118,7 +101,7 @@ mod tests {
         let lower = flat_surface(0.0, "original");
         let upper = flat_surface(5.0, "filled");
 
-        let result = compute_cut_fill(&lower, &upper, 20, SliverFilter::default());
+        let result = compute_cut_fill(&lower, &upper, SliverFilter::default());
 
         assert!(
             result.total_cut_volume < 1.0,
@@ -134,7 +117,6 @@ mod tests {
 
     #[test]
     fn crossing_surfaces_have_both_cut_and_fill() {
-        // Surface A: tilted, z = 5 + 0.5*(x-5) => z ranges from 2.5 to 7.5
         let surface_a = TriSurface {
             name: "tilted_a".into(),
             vertices: vec![
@@ -146,10 +128,9 @@ mod tests {
             indices: vec![[0, 1, 2], [0, 2, 3]],
         };
 
-        // Surface B: flat at z=5
         let surface_b = flat_surface(5.0, "flat_b");
 
-        let result = compute_cut_fill(&surface_a, &surface_b, 40, SliverFilter {
+        let result = compute_cut_fill(&surface_a, &surface_b, SliverFilter {
             min_volume_m3: 0.1,
             min_thickness_m: 0.01,
         });
@@ -165,7 +146,6 @@ mod tests {
             result.total_fill_volume
         );
 
-        // By symmetry, cut ≈ fill for this geometry
         let diff = (result.total_cut_volume - result.total_fill_volume).abs();
         let avg = (result.total_cut_volume + result.total_fill_volume) / 2.0;
         assert!(
@@ -186,12 +166,11 @@ mod tests {
         let upper = flat_surface(0.01, "thin_upper");
         let lower = flat_surface(0.0, "lower");
 
-        // Volume = 10*10*0.01 = 1.0 m³, avg thickness = 0.01m
         let strict_filter = SliverFilter {
             min_volume_m3: 0.5,
             min_thickness_m: 0.05,
         };
-        let result = compute_cut_fill(&upper, &lower, 10, strict_filter);
+        let result = compute_cut_fill(&upper, &lower, strict_filter);
 
         assert!(
             result.cut_solids.is_empty(),
@@ -208,7 +187,7 @@ mod tests {
             min_volume_m3: 1.0,
             min_thickness_m: 0.1,
         };
-        let result = compute_cut_fill(&upper, &lower, 20, filter);
+        let result = compute_cut_fill(&upper, &lower, filter);
 
         assert!(
             !result.cut_solids.is_empty(),
@@ -218,9 +197,6 @@ mod tests {
 
     #[test]
     fn known_volume_two_simple_surfaces() {
-        // Test case: two overlapping 20x20m surfaces.
-        // Upper is a flat plane at z=10, lower at z=0.
-        // Expected volume = 20*20*10 = 4000 m³.
         let upper = TriSurface {
             name: "design".into(),
             vertices: vec![
@@ -243,7 +219,7 @@ mod tests {
             indices: vec![[0, 1, 2], [0, 2, 3]],
         };
 
-        let result = compute_cut_fill(&upper, &lower, 40, SliverFilter {
+        let result = compute_cut_fill(&upper, &lower, SliverFilter {
             min_volume_m3: 0.01,
             min_thickness_m: 0.001,
         });

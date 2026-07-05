@@ -19,7 +19,6 @@ export function parseSurfaces(data: Uint8Array): TriSurface[] {
 export function runConformance(
   surfaces: Record<string, TriSurface>,
   mode: Mode,
-  resolution: number,
   minVolume: number,
   minThickness: number,
 ): ConformanceResult {
@@ -30,7 +29,6 @@ export function runConformance(
     JSON.stringify(surfaces.schedule_end),
     JSON.stringify(surfaces.schedule_future),
     mode,
-    resolution,
     minVolume,
     minThickness,
   ) as ConformanceResult;
@@ -39,7 +37,6 @@ export function runConformance(
 export function runConformanceWithBoundaries(
   surfaces: Record<string, TriSurface>,
   mode: Mode,
-  resolution: number,
   minVolume: number,
   minThickness: number,
   boundaries: BoundaryRegion[],
@@ -51,7 +48,6 @@ export function runConformanceWithBoundaries(
     JSON.stringify(surfaces.schedule_end),
     JSON.stringify(surfaces.schedule_future),
     mode,
-    resolution,
     minVolume,
     minThickness,
     JSON.stringify(boundaries),

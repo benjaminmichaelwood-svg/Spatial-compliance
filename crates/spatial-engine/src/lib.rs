@@ -1,5 +1,6 @@
 pub mod types;
 pub mod format;
+pub mod bvh;
 pub mod intersect;
 pub mod solid;
 pub mod cutfill;
