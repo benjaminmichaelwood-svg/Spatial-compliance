@@ -2,6 +2,8 @@ import { useState, useCallback, useMemo } from 'react';
 import type { SlideData } from './pptxReport';
 import WaterfallChart from './WaterfallChart';
 import DonutGauge from './DonutGauge';
+import DefinitionsSchematic from './DefinitionsSchematic';
+import { getDomainDefs } from './definitionsData';
 
 interface Props {
   slides: SlideData[];
@@ -61,6 +63,39 @@ function WaterfallSlideContent({ slide }: { slide: SlideData }) {
   );
 }
 
+function DefinitionsSlideContent({ slide }: { slide: SlideData }) {
+  const defs = getDomainDefs(slide.mode);
+  return (
+    <div className="flex h-full w-full flex-col overflow-y-auto p-4">
+      <div className="mx-auto w-full max-w-[600px]">
+        <DefinitionsSchematic mode={slide.mode} />
+      </div>
+      <table className="mt-3 w-full border-collapse text-left">
+        <thead>
+          <tr className="bg-slate-100">
+            <th className="w-5 px-1 py-1" />
+            <th className="px-2 py-1 text-[9px] font-semibold text-slate-600">Domain</th>
+            <th className="px-2 py-1 text-[9px] font-semibold text-slate-600">Abbrev.</th>
+            <th className="px-2 py-1 text-[9px] font-semibold text-slate-600">Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          {defs.map((d) => (
+            <tr key={d.key} className="border-t border-slate-100">
+              <td className="px-1 py-1">
+                <div className="h-3 w-3 rounded-sm" style={{ backgroundColor: d.color }} />
+              </td>
+              <td className="px-2 py-1 text-[9px] font-medium text-slate-700">{d.name}</td>
+              <td className="px-2 py-1 text-[9px] font-bold text-slate-700">{d.abbrev}</td>
+              <td className="px-2 py-1 text-[8px] text-slate-500">{d.description}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export default function SlidePreview({ slides, onReorder, onRemove }: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
 
@@ -116,9 +151,11 @@ export default function SlidePreview({ slides, onReorder, onRemove }: Props) {
         {/* Slide content */}
         <div className="h-[calc(100%-6rem)] overflow-hidden">
           {activeSlide && (
-            activeSlide.type === 'pit-viewer' || activeSlide.type === 'summary-viewer'
-              ? <ViewerSlideContent slide={activeSlide} />
-              : <WaterfallSlideContent slide={activeSlide} />
+            activeSlide.type === 'definitions'
+              ? <DefinitionsSlideContent slide={activeSlide} />
+              : activeSlide.type === 'pit-viewer' || activeSlide.type === 'summary-viewer'
+                ? <ViewerSlideContent slide={activeSlide} />
+                : <WaterfallSlideContent slide={activeSlide} />
           )}
         </div>
 
@@ -171,7 +208,7 @@ export default function SlidePreview({ slides, onReorder, onRemove }: Props) {
                   {slide.title}
                 </span>
                 <span className="text-[7px] text-slate-400">
-                  {slide.type.includes('viewer') ? '3D View' : 'Waterfall'}
+                  {slide.type === 'definitions' ? 'Definitions' : slide.type.includes('viewer') ? '3D View' : 'Waterfall'}
                 </span>
               </button>
 

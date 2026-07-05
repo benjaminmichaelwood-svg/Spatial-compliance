@@ -1,10 +1,11 @@
 import PptxGenJS from 'pptxgenjs';
 import type { DomainSolid, BlockSummary, Mode, BoundaryRegion } from '../../types';
 import { buildWaterfallData } from './WaterfallChart';
+import { getColumns, getDomainDefs } from './definitionsData';
 
 export interface SlideData {
   id: string;
-  type: 'pit-viewer' | 'pit-waterfall' | 'summary-viewer' | 'summary-waterfall';
+  type: 'definitions' | 'pit-viewer' | 'pit-waterfall' | 'summary-viewer' | 'summary-waterfall';
   title: string;
   subtitle: string;
   pitName?: string;
@@ -142,6 +143,131 @@ function addWaterfallToSlide(
   });
 }
 
+function addDefinitionsSlide(
+  pptx: PptxGenJS,
+  mode: Mode,
+  subtitle: string,
+  templateLayout?: string,
+) {
+  const opts: any = templateLayout ? { masterName: templateLayout } : {};
+  const slide = pptx.addSlide(opts);
+
+  slide.addText('Conformance Domain Definitions', {
+    x: 0.4, y: 0.15, w: 12, h: 0.35,
+    fontSize: 18, bold: true, color: '1a1a19',
+  });
+  slide.addText(subtitle, {
+    x: 0.4, y: 0.45, w: 12, h: 0.25,
+    fontSize: 10, color: '898781',
+  });
+
+  const [leftCol, rightCol] = getColumns(mode);
+
+  const colW = 3.2;
+  const colH = 2.8;
+  const leftX = 1.8;
+  const rightX = 7.3;
+  const topY = 0.85;
+  const bandH = colH / 4;
+
+  function drawColumn(col: typeof leftCol, cx: number) {
+    slide.addText(col.title, {
+      x: cx, y: topY - 0.22, w: colW, h: 0.2,
+      fontSize: 9, bold: true, color: '444444', align: 'center',
+    });
+
+    for (let i = 0; i < col.bands.length; i++) {
+      const band = col.bands[i];
+      const by = topY + i * bandH;
+      slide.addShape('rect' as any, {
+        x: cx, y: by, w: colW, h: bandH,
+        fill: { color: band.color.replace('#', '') },
+        line: { color: '555555', width: 0.5 },
+      } as any);
+      if (band.label) {
+        slide.addText(band.label, {
+          x: cx, y: by, w: colW, h: bandH,
+          fontSize: 8, bold: true, color: 'FFFFFF',
+          align: 'center', valign: 'middle',
+        });
+      }
+    }
+
+    slide.addShape('rect' as any, {
+      x: cx, y: topY, w: colW, h: colH,
+      fill: { type: 'none' as any },
+      line: { color: '444444', width: 1 },
+    } as any);
+
+    const labels = col.leftLabels.length > 0 ? col.leftLabels : col.rightLabels;
+    const isLeft = col.leftLabels.length > 0;
+
+    for (const sl of labels) {
+      const fraction = (sl.y - 34) / 180;
+      const ly = topY + fraction * colH;
+      if (isLeft) {
+        slide.addText(`${sl.label}  ${sl.fullName}`, {
+          x: cx - 2.0, y: ly - 0.1, w: 1.9, h: 0.2,
+          fontSize: 7, color: '555555', align: 'right', bold: false,
+        });
+        slide.addShape('line' as any, {
+          x: cx - 0.05, y: ly, w: 0.1, h: 0,
+          line: { color: '888888', width: 0.5 },
+        } as any);
+      } else {
+        slide.addText(`${sl.label}  ${sl.fullName}`, {
+          x: cx + colW + 0.1, y: ly - 0.1, w: 1.9, h: 0.2,
+          fontSize: 7, color: '555555', align: 'left', bold: false,
+        });
+        slide.addShape('line' as any, {
+          x: cx + colW - 0.05, y: ly, w: 0.1, h: 0,
+          line: { color: '888888', width: 0.5 },
+        } as any);
+      }
+    }
+  }
+
+  drawColumn(leftCol, leftX);
+  drawColumn(rightCol, rightX);
+
+  const depthLabel = mode === 'dig' ? 'Increasing Depth  ↓' : 'Increasing Height  ↑';
+  slide.addText(depthLabel, {
+    x: 0.3, y: topY + colH / 2 - 0.15, w: 1.2, h: 0.3,
+    fontSize: 7, color: 'AAAAAA', align: 'center',
+    rotate: mode === 'dig' ? 0 : 0,
+  });
+
+  const defs = getDomainDefs(mode);
+  const tableRows: any[][] = [
+    [
+      { text: '', options: { fill: { color: 'E8E8E8' }, fontSize: 1 } },
+      { text: 'Domain', options: { bold: true, fontSize: 8, fill: { color: 'E8E8E8' }, color: '333333' } },
+      { text: 'Abbrev.', options: { bold: true, fontSize: 8, fill: { color: 'E8E8E8' }, color: '333333' } },
+      { text: 'Description', options: { bold: true, fontSize: 8, fill: { color: 'E8E8E8' }, color: '333333' } },
+    ],
+  ];
+
+  for (const d of defs) {
+    tableRows.push([
+      { text: '', options: { fill: { color: d.color.replace('#', '') } } },
+      { text: d.name, options: { fontSize: 7.5, color: '333333' } },
+      { text: d.abbrev, options: { fontSize: 7.5, bold: true, color: '333333' } },
+      { text: d.description, options: { fontSize: 7, color: '555555' } },
+    ]);
+  }
+
+  slide.addTable(tableRows, {
+    x: 0.5, y: 4.05, w: 12.3,
+    colW: [0.25, 2.2, 0.8, 9.05],
+    border: { type: 'solid', pt: 0.5, color: 'CCCCCC' },
+    rowH: 0.28,
+    margin: [2, 4, 2, 4],
+    autoPage: false,
+  } as any);
+
+  return slide;
+}
+
 function addViewerSlide(
   pptx: PptxGenJS,
   data: SlideData,
@@ -230,6 +356,21 @@ export function buildSlides(
   pitScreenshots: Map<string, string>,
 ): SlideData[] {
   const slides: SlideData[] = [];
+
+  slides.push({
+    id: 'definitions',
+    type: 'definitions',
+    title: 'Conformance Domain Definitions',
+    subtitle: `${mode.toUpperCase()} mode · ${comparisonName}`,
+    domains: [],
+    mode,
+    conformancePct: 0,
+    productionPct: 0,
+    plannedVol: 0,
+    actualVol: 0,
+    viewerScreenshot: null,
+  });
+
   const conformKey = mode === 'dig' ? 'PlannedAndMined' : 'PlannedAndDumped';
   const pnmKey = mode === 'dig' ? 'PlannedNotMined' : 'PlannedNotDumped';
   const mnpKey = mode === 'dig' ? 'MinedNotPlanned' : 'DumpedNotPlanned';
@@ -341,7 +482,9 @@ export async function generatePPTX(
   }
 
   for (const data of slides) {
-    if (data.type === 'pit-viewer' || data.type === 'summary-viewer') {
+    if (data.type === 'definitions') {
+      addDefinitionsSlide(pptx, data.mode, data.subtitle, templateLayout);
+    } else if (data.type === 'pit-viewer' || data.type === 'summary-viewer') {
       addViewerSlide(pptx, data, templateLayout);
     } else {
       addWaterfallSlide(pptx, data, templateLayout);
