@@ -69,21 +69,30 @@ function buildWaterfallData(
 
   const conformKey = mode === 'dig' ? 'PlannedAndMined' : 'PlannedAndDumped';
   const pnmKey = mode === 'dig' ? 'PlannedNotMined' : 'PlannedNotDumped';
+  const mnpKey = mode === 'dig' ? 'MinedNotPlanned' : 'DumpedNotPlanned';
 
   const conformVol = volumeByDomain.get(conformKey) ?? 0;
   const pnmVol = volumeByDomain.get(pnmKey) ?? 0;
+  const mnpVol = volumeByDomain.get(mnpKey) ?? 0;
   const planned = conformVol + pnmVol;
 
+  const hasSchedule = planned > 0.01 || conformVol > 0.01;
+  const hasProduction = conformVol > 0.01 || mnpVol > 0.01 ||
+    (volumeByDomain.get(mode === 'dig' ? 'MinedBeforeStart' : 'DumpedBeforeStart') ?? 0) > 0.01;
+
   const items: WaterfallItem[] = [];
-  items.push({
-    name: 'Planned',
-    base: 0,
-    value: planned,
-    total: planned,
-    color: TOTAL_BAR_COLOR,
-    isTotal: true,
-    pct: '',
-  });
+
+  if (hasSchedule) {
+    items.push({
+      name: 'Planned',
+      base: 0,
+      value: planned,
+      total: planned,
+      color: TOTAL_BAR_COLOR,
+      isTotal: true,
+      pct: '',
+    });
+  }
 
   let running = planned;
   const steps = getWaterfallSteps(mode);
@@ -94,7 +103,8 @@ function buildWaterfallData(
     const delta = step.sign * vol;
     const base = delta >= 0 ? running : running + delta;
     running += delta;
-    const pct = planned > 0 ? `${((vol / planned) * 100).toFixed(1)}%` : '0%';
+    const ref = hasSchedule ? planned : running;
+    const pct = ref > 0 ? `${((vol / ref) * 100).toFixed(1)}%` : '0%';
     items.push({
       name: step.label,
       base,
@@ -106,15 +116,17 @@ function buildWaterfallData(
     });
   }
 
-  items.push({
-    name: 'Production',
-    base: 0,
-    value: running,
-    total: running,
-    color: TOTAL_BAR_COLOR,
-    isTotal: true,
-    pct: planned > 0 ? `${((running / planned) * 100).toFixed(1)}%` : '0%',
-  });
+  if (hasProduction || hasSchedule) {
+    items.push({
+      name: hasProduction ? 'Production' : 'Total',
+      base: 0,
+      value: running,
+      total: running,
+      color: TOTAL_BAR_COLOR,
+      isTotal: true,
+      pct: planned > 0 ? `${((running / planned) * 100).toFixed(1)}%` : '',
+    });
+  }
 
   return items;
 }

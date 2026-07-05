@@ -64,6 +64,16 @@ pub fn run_cut_fill_from_json(
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+fn parse_optional_surface(json: &str) -> Result<Option<TriSurface>, JsValue> {
+    if json.is_empty() {
+        Ok(None)
+    } else {
+        serde_json::from_str(json)
+            .map(Some)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+}
+
 #[wasm_bindgen]
 pub fn run_conformance(
     production_start_json: &str,
@@ -75,16 +85,11 @@ pub fn run_conformance(
     min_volume: f64,
     min_thickness: f64,
 ) -> Result<JsValue, JsValue> {
-    let ps: TriSurface =
-        serde_json::from_str(production_start_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let pe: TriSurface =
-        serde_json::from_str(production_end_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let ss: TriSurface =
-        serde_json::from_str(schedule_start_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let se: TriSurface =
-        serde_json::from_str(schedule_end_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let sf: TriSurface =
-        serde_json::from_str(schedule_future_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let ps = parse_optional_surface(production_start_json)?;
+    let pe = parse_optional_surface(production_end_json)?;
+    let ss = parse_optional_surface(schedule_start_json)?;
+    let se = parse_optional_surface(schedule_end_json)?;
+    let sf = parse_optional_surface(schedule_future_json)?;
 
     let mode = match mode {
         "dig" => Mode::Dig,
@@ -93,11 +98,11 @@ pub fn run_conformance(
     };
 
     let input = ConformanceInput {
-        production_start: &ps,
-        production_end: &pe,
-        schedule_start: &ss,
-        schedule_end: &se,
-        schedule_future: &sf,
+        production_start: ps.as_ref(),
+        production_end: pe.as_ref(),
+        schedule_start: ss.as_ref(),
+        schedule_end: se.as_ref(),
+        schedule_future: sf.as_ref(),
         mode,
         filter: SliverFilter {
             min_volume_m3: min_volume,
@@ -121,11 +126,11 @@ pub fn run_conformance_from_binary(
     min_volume: f64,
     min_thickness: f64,
 ) -> Result<JsValue, JsValue> {
-    let ps = decode_surface(prod_start_data).map_err(|e| JsValue::from_str(&e))?;
-    let pe = decode_surface(prod_end_data).map_err(|e| JsValue::from_str(&e))?;
-    let ss = decode_surface(sched_start_data).map_err(|e| JsValue::from_str(&e))?;
-    let se = decode_surface(sched_end_data).map_err(|e| JsValue::from_str(&e))?;
-    let sf = decode_surface(sched_future_data).map_err(|e| JsValue::from_str(&e))?;
+    let ps = if prod_start_data.is_empty() { None } else { Some(decode_surface(prod_start_data).map_err(|e| JsValue::from_str(&e))?) };
+    let pe = if prod_end_data.is_empty() { None } else { Some(decode_surface(prod_end_data).map_err(|e| JsValue::from_str(&e))?) };
+    let ss = if sched_start_data.is_empty() { None } else { Some(decode_surface(sched_start_data).map_err(|e| JsValue::from_str(&e))?) };
+    let se = if sched_end_data.is_empty() { None } else { Some(decode_surface(sched_end_data).map_err(|e| JsValue::from_str(&e))?) };
+    let sf = if sched_future_data.is_empty() { None } else { Some(decode_surface(sched_future_data).map_err(|e| JsValue::from_str(&e))?) };
 
     let mode = match mode {
         "dig" => Mode::Dig,
@@ -134,11 +139,11 @@ pub fn run_conformance_from_binary(
     };
 
     let input = ConformanceInput {
-        production_start: &ps,
-        production_end: &pe,
-        schedule_start: &ss,
-        schedule_end: &se,
-        schedule_future: &sf,
+        production_start: ps.as_ref(),
+        production_end: pe.as_ref(),
+        schedule_start: ss.as_ref(),
+        schedule_end: se.as_ref(),
+        schedule_future: sf.as_ref(),
         mode,
         filter: SliverFilter {
             min_volume_m3: min_volume,
@@ -163,16 +168,11 @@ pub fn run_conformance_with_boundaries(
     min_thickness: f64,
     boundaries_json: &str,
 ) -> Result<JsValue, JsValue> {
-    let ps: TriSurface =
-        serde_json::from_str(production_start_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let pe: TriSurface =
-        serde_json::from_str(production_end_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let ss: TriSurface =
-        serde_json::from_str(schedule_start_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let se: TriSurface =
-        serde_json::from_str(schedule_end_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let sf: TriSurface =
-        serde_json::from_str(schedule_future_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let ps = parse_optional_surface(production_start_json)?;
+    let pe = parse_optional_surface(production_end_json)?;
+    let ss = parse_optional_surface(schedule_start_json)?;
+    let se = parse_optional_surface(schedule_end_json)?;
+    let sf = parse_optional_surface(schedule_future_json)?;
 
     let boundaries: Vec<BoundaryRegion> =
         serde_json::from_str(boundaries_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -184,11 +184,11 @@ pub fn run_conformance_with_boundaries(
     };
 
     let input = ConformanceInput {
-        production_start: &ps,
-        production_end: &pe,
-        schedule_start: &ss,
-        schedule_end: &se,
-        schedule_future: &sf,
+        production_start: ps.as_ref(),
+        production_end: pe.as_ref(),
+        schedule_start: ss.as_ref(),
+        schedule_end: se.as_ref(),
+        schedule_future: sf.as_ref(),
         mode,
         filter: SliverFilter {
             min_volume_m3: min_volume,

@@ -106,11 +106,11 @@ pub struct ConformanceSummary {
 // ---------------------------------------------------------------------------
 
 pub struct ConformanceInput<'a> {
-    pub production_start: &'a TriSurface,
-    pub production_end: &'a TriSurface,
-    pub schedule_start: &'a TriSurface,
-    pub schedule_end: &'a TriSurface,
-    pub schedule_future: &'a TriSurface,
+    pub production_start: Option<&'a TriSurface>,
+    pub production_end: Option<&'a TriSurface>,
+    pub schedule_start: Option<&'a TriSurface>,
+    pub schedule_end: Option<&'a TriSurface>,
+    pub schedule_future: Option<&'a TriSurface>,
     pub mode: Mode,
     pub filter: SliverFilter,
     pub boundaries: &'a [BoundaryRegion],
@@ -369,12 +369,29 @@ fn classify_cell_no_schedule(ps: f64, pe: f64, mode: Mode) -> Vec<Interval> {
     }
 }
 
+fn classify_cell_schedule_only(ss: f64, se: f64, mode: Mode) -> Vec<Interval> {
+    let eps = 1e-9;
+    match mode {
+        Mode::Dig if ss > se + eps => vec![Interval {
+            domain: Domain::PlannedNotMined,
+            upper: ss,
+            lower: se,
+        }],
+        Mode::Dump if se > ss + eps => vec![Interval {
+            domain: Domain::PlannedNotDumped,
+            upper: se,
+            lower: ss,
+        }],
+        _ => vec![],
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main classifier entry point — mesh-based iteration via BVH
 // ---------------------------------------------------------------------------
 
 pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
-    let surfaces: [&TriSurface; 5] = [
+    let opt_surfaces: [Option<&TriSurface>; 5] = [
         input.production_start,
         input.production_end,
         input.schedule_start,
@@ -382,35 +399,39 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
         input.schedule_future,
     ];
 
-    // Build BVH for each surface
-    let bvhs: Vec<SurfaceBvh> = surfaces.iter().map(|s| SurfaceBvh::build(s)).collect();
+    let bvhs: [Option<SurfaceBvh>; 5] = [
+        opt_surfaces[0].map(SurfaceBvh::build),
+        opt_surfaces[1].map(SurfaceBvh::build),
+        opt_surfaces[2].map(SurfaceBvh::build),
+        opt_surfaces[3].map(SurfaceBvh::build),
+        opt_surfaces[4].map(SurfaceBvh::build),
+    ];
 
     let has_boundaries = !input.boundaries.is_empty();
 
     use std::collections::HashMap;
     let mut builders: HashMap<(Domain, Option<usize>), MeshBuilder> = HashMap::new();
 
-    // Iterate triangles from ALL surfaces, starting with the most finely
-    // tessellated. For each surface, iterate its triangles and sample all 5
-    // surfaces at the centroid via BVH. Skip triangles whose centroid is
-    // already covered by a surface iterated earlier (to avoid double-counting).
-    let mut surface_order: Vec<usize> = (0..5).collect();
-    surface_order.sort_by(|&a, &b| surfaces[b].num_triangles().cmp(&surfaces[a].num_triangles()));
+    let mut present_indices: Vec<usize> = (0..5).filter(|&i| opt_surfaces[i].is_some()).collect();
+    present_indices.sort_by(|&a, &b| {
+        opt_surfaces[b].unwrap().num_triangles().cmp(&opt_surfaces[a].unwrap().num_triangles())
+    });
 
     let mut processed_surfaces: Vec<usize> = Vec::new();
 
-    for &si in &surface_order {
-        let ref_surface = surfaces[si];
+    for &si in &present_indices {
+        let ref_surface = opt_surfaces[si].unwrap();
 
         for ti in 0..ref_surface.num_triangles() {
             let tri = ref_surface.triangle(ti);
             let cx = (tri.v0.x + tri.v1.x + tri.v2.x) / 3.0;
             let cy = (tri.v0.y + tri.v1.y + tri.v2.y) / 3.0;
 
-            // Skip if a previously-iterated surface already covers this centroid
-            let already_covered = processed_surfaces
-                .iter()
-                .any(|&prev_si| bvhs[prev_si].interpolate_z(cx, cy).is_some());
+            let already_covered = processed_surfaces.iter().any(|&prev_si| {
+                bvhs[prev_si]
+                    .as_ref()
+                    .map_or(false, |b| b.interpolate_z(cx, cy).is_some())
+            });
             if already_covered {
                 continue;
             }
@@ -424,30 +445,33 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
                 None
             };
 
-            let zs: Vec<Option<f64>> = (0..5)
-                .map(|i| {
-                    if i == si {
-                        Some((tri.v0.z + tri.v1.z + tri.v2.z) / 3.0)
-                    } else {
-                        bvhs[i].interpolate_z(cx, cy)
-                    }
-                })
-                .collect();
+            let zs: [Option<f64>; 5] = [
+                if si == 0 { Some((tri.v0.z + tri.v1.z + tri.v2.z) / 3.0) } else { bvhs[0].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
+                if si == 1 { Some((tri.v0.z + tri.v1.z + tri.v2.z) / 3.0) } else { bvhs[1].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
+                if si == 2 { Some((tri.v0.z + tri.v1.z + tri.v2.z) / 3.0) } else { bvhs[2].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
+                if si == 3 { Some((tri.v0.z + tri.v1.z + tri.v2.z) / 3.0) } else { bvhs[3].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
+                if si == 4 { Some((tri.v0.z + tri.v1.z + tri.v2.z) / 3.0) } else { bvhs[4].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
+            ];
 
-            let (ps, pe) = match (zs[0], zs[1]) {
-                (Some(a), Some(b)) => (a, b),
-                _ => continue,
-            };
+            let has_production = zs[0].is_some() && zs[1].is_some();
+            let has_schedule = zs[2].is_some() && zs[3].is_some();
 
-            let intervals = match (zs[2], zs[3]) {
-                (Some(ss), Some(se)) => {
-                    let sf = zs[4];
-                    match input.mode {
-                        Mode::Dig => classify_cell_dig(ps, pe, ss, se, sf),
-                        Mode::Dump => classify_cell_dump(ps, pe, ss, se, sf),
-                    }
+            let intervals = if has_production && has_schedule {
+                let (ps, pe) = (zs[0].unwrap(), zs[1].unwrap());
+                let (ss, se) = (zs[2].unwrap(), zs[3].unwrap());
+                let sf = zs[4];
+                match input.mode {
+                    Mode::Dig => classify_cell_dig(ps, pe, ss, se, sf),
+                    Mode::Dump => classify_cell_dump(ps, pe, ss, se, sf),
                 }
-                _ => classify_cell_no_schedule(ps, pe, input.mode),
+            } else if has_production {
+                let (ps, pe) = (zs[0].unwrap(), zs[1].unwrap());
+                classify_cell_no_schedule(ps, pe, input.mode)
+            } else if has_schedule {
+                let (ss, se) = (zs[2].unwrap(), zs[3].unwrap());
+                classify_cell_schedule_only(ss, se, input.mode)
+            } else {
+                continue;
             };
 
             let tri_area_2d = ((tri.v1.x - tri.v0.x) * (tri.v2.y - tri.v0.y)
@@ -638,11 +662,11 @@ mod tests {
         mode: Mode,
     ) -> ConformanceResult {
         classify_conformance(&ConformanceInput {
-            production_start: ps,
-            production_end: pe,
-            schedule_start: ss,
-            schedule_end: se,
-            schedule_future: sf,
+            production_start: Some(ps),
+            production_end: Some(pe),
+            schedule_start: Some(ss),
+            schedule_end: Some(se),
+            schedule_future: Some(sf),
             mode,
             filter: SliverFilter {
                 min_volume_m3: 0.01,
@@ -975,11 +999,11 @@ mod tests {
         let sf = flat(99.0, "sf", 10.0);
 
         let r = classify_conformance(&ConformanceInput {
-            production_start: &ps,
-            production_end: &pe,
-            schedule_start: &ss,
-            schedule_end: &se,
-            schedule_future: &sf,
+            production_start: Some(&ps),
+            production_end: Some(&pe),
+            schedule_start: Some(&ss),
+            schedule_end: Some(&se),
+            schedule_future: Some(&sf),
             mode: Mode::Dig,
             filter: SliverFilter {
                 min_volume_m3: 0.5,
@@ -1034,11 +1058,11 @@ mod tests {
         ];
 
         let r = classify_conformance(&ConformanceInput {
-            production_start: &ps,
-            production_end: &pe,
-            schedule_start: &ss,
-            schedule_end: &se,
-            schedule_future: &sf,
+            production_start: Some(&ps),
+            production_end: Some(&pe),
+            schedule_start: Some(&ss),
+            schedule_end: Some(&se),
+            schedule_future: Some(&sf),
             mode: Mode::Dig,
             filter: SliverFilter {
                 min_volume_m3: 0.01,
@@ -1085,5 +1109,111 @@ mod tests {
         );
         assert!(r.domains.iter().all(|d| d.block_name.is_none()));
         assert!(r.summary.block_summaries.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Partial surface tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn production_only_dig() {
+        let ps = flat(100.0, "ps", 10.0);
+        let pe = flat(90.0, "pe", 10.0);
+
+        let r = classify_conformance(&ConformanceInput {
+            production_start: Some(&ps),
+            production_end: Some(&pe),
+            schedule_start: None,
+            schedule_end: None,
+            schedule_future: None,
+            mode: Mode::Dig,
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            boundaries: &[],
+        });
+
+        assert_vol(domain_vol(&r, Domain::MinedNotPlanned), 1000.0, "MNP");
+        assert_eq!(r.domains.len(), 1);
+    }
+
+    #[test]
+    fn schedule_only_dig() {
+        let ss = flat(100.0, "ss", 10.0);
+        let se = flat(90.0, "se", 10.0);
+
+        let r = classify_conformance(&ConformanceInput {
+            production_start: None,
+            production_end: None,
+            schedule_start: Some(&ss),
+            schedule_end: Some(&se),
+            schedule_future: None,
+            mode: Mode::Dig,
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            boundaries: &[],
+        });
+
+        assert_vol(domain_vol(&r, Domain::PlannedNotMined), 1000.0, "PNM");
+        assert_eq!(r.domains.len(), 1);
+    }
+
+    #[test]
+    fn production_only_dump() {
+        let ps = flat(100.0, "ps", 10.0);
+        let pe = flat(110.0, "pe", 10.0);
+
+        let r = classify_conformance(&ConformanceInput {
+            production_start: Some(&ps),
+            production_end: Some(&pe),
+            schedule_start: None,
+            schedule_end: None,
+            schedule_future: None,
+            mode: Mode::Dump,
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            boundaries: &[],
+        });
+
+        assert_vol(domain_vol(&r, Domain::DumpedNotPlanned), 1000.0, "DNP");
+        assert_eq!(r.domains.len(), 1);
+    }
+
+    #[test]
+    fn schedule_only_dump() {
+        let ss = flat(100.0, "ss", 10.0);
+        let se = flat(110.0, "se", 10.0);
+
+        let r = classify_conformance(&ConformanceInput {
+            production_start: None,
+            production_end: None,
+            schedule_start: Some(&ss),
+            schedule_end: Some(&se),
+            schedule_future: None,
+            mode: Mode::Dump,
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            boundaries: &[],
+        });
+
+        assert_vol(domain_vol(&r, Domain::PlannedNotDumped), 1000.0, "PND");
+        assert_eq!(r.domains.len(), 1);
+    }
+
+    #[test]
+    fn four_surfaces_no_future() {
+        let ps = flat(100.0, "ps", 10.0);
+        let pe = flat(70.0, "pe", 10.0);
+        let ss = flat(100.0, "ss", 10.0);
+        let se = flat(80.0, "se", 10.0);
+
+        let r = classify_conformance(&ConformanceInput {
+            production_start: Some(&ps),
+            production_end: Some(&pe),
+            schedule_start: Some(&ss),
+            schedule_end: Some(&se),
+            schedule_future: None,
+            mode: Mode::Dig,
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            boundaries: &[],
+        });
+
+        assert!(has_domain(&r, Domain::PlannedAndMined), "Expected PAM");
+        assert!(has_domain(&r, Domain::MinedNotPlanned), "Expected MNP");
     }
 }

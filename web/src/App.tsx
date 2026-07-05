@@ -205,11 +205,10 @@ export default function App() {
     await new Promise((r) => requestAnimationFrame(r));
 
     try {
-      const surfaces: Record<string, TriSurface> = {};
+      const surfaces: Partial<Record<string, TriSurface>> = {};
       for (const { key } of SURFACE_ROLES) {
         const entry = uploads.get(key);
-        if (!entry) throw new Error(`Missing surface: ${key}`);
-        surfaces[key] = entry.surface;
+        if (entry) surfaces[key] = entry.surface;
       }
 
       const res =
@@ -323,7 +322,7 @@ export default function App() {
     return <LandingPage onStart={handleStart} />;
   }
 
-  const allAssigned = SURFACE_ROLES.every((r) => uploads.has(r.key));
+  const canRun = uploads.size >= 2;
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden">
@@ -499,7 +498,7 @@ export default function App() {
           <div className="sidebar-section">
             <button
               type="button"
-              disabled={!allAssigned || isRunning || !wasmReady}
+              disabled={!canRun || isRunning || !wasmReady}
               onClick={handleRun}
               className="flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5
                          text-sm font-medium text-white transition-colors hover:bg-indigo-700
@@ -627,10 +626,10 @@ export default function App() {
                     </svg>
                   </div>
                   <p className="text-sm font-medium text-slate-400">
-                    {allAssigned ? 'Ready to run — click "Run Conformance"' : 'Upload surfaces to get started'}
+                    {canRun ? 'Ready to run — click "Run Conformance"' : 'Upload surfaces to get started'}
                   </p>
                   <p className="mt-1 text-xs text-slate-500">
-                    Assign all 5 surfaces, then run the conformance analysis
+                    Assign at least 2 surfaces, then run the conformance analysis
                   </p>
                 </div>
               </div>

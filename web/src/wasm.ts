@@ -16,18 +16,22 @@ export function parseSurfaces(data: Uint8Array): TriSurface[] {
   return wasmModule.parse_surfaces(data) as TriSurface[];
 }
 
+function surfaceJson(s: TriSurface | undefined): string {
+  return s ? JSON.stringify(s) : '';
+}
+
 export function runConformance(
-  surfaces: Record<string, TriSurface>,
+  surfaces: Partial<Record<string, TriSurface>>,
   mode: Mode,
   minVolume: number,
   minThickness: number,
 ): ConformanceResult {
   return wasmModule.run_conformance(
-    JSON.stringify(surfaces.production_start),
-    JSON.stringify(surfaces.production_end),
-    JSON.stringify(surfaces.schedule_start),
-    JSON.stringify(surfaces.schedule_end),
-    JSON.stringify(surfaces.schedule_future),
+    surfaceJson(surfaces.production_start),
+    surfaceJson(surfaces.production_end),
+    surfaceJson(surfaces.schedule_start),
+    surfaceJson(surfaces.schedule_end),
+    surfaceJson(surfaces.schedule_future),
     mode,
     minVolume,
     minThickness,
@@ -35,18 +39,18 @@ export function runConformance(
 }
 
 export function runConformanceWithBoundaries(
-  surfaces: Record<string, TriSurface>,
+  surfaces: Partial<Record<string, TriSurface>>,
   mode: Mode,
   minVolume: number,
   minThickness: number,
   boundaries: BoundaryRegion[],
 ): ConformanceResult {
   return wasmModule.run_conformance_with_boundaries(
-    JSON.stringify(surfaces.production_start),
-    JSON.stringify(surfaces.production_end),
-    JSON.stringify(surfaces.schedule_start),
-    JSON.stringify(surfaces.schedule_end),
-    JSON.stringify(surfaces.schedule_future),
+    surfaceJson(surfaces.production_start),
+    surfaceJson(surfaces.production_end),
+    surfaceJson(surfaces.schedule_start),
+    surfaceJson(surfaces.schedule_end),
+    surfaceJson(surfaces.schedule_future),
     mode,
     minVolume,
     minThickness,

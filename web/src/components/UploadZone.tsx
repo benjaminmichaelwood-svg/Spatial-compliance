@@ -54,11 +54,17 @@ export default function UploadZone({ uploads, onUpdate, onLoadSample }: Props) {
     e.stopPropagation();
   };
 
-  const allAssigned = SURFACE_ROLES.every((r) => uploads.has(r.key));
+  const assignedCount = uploads.size;
+  const canRun = assignedCount >= 2;
 
   return (
     <div className="sidebar-section">
-      <div className="sidebar-heading">Surfaces</div>
+      <div className="flex items-center justify-between">
+        <div className="sidebar-heading">Surfaces</div>
+        <span className={`text-[10px] ${canRun ? 'text-emerald-400' : 'text-slate-500'}`}>
+          {assignedCount}/5 assigned{assignedCount < 2 ? ' (min 2)' : ''}
+        </span>
+      </div>
 
       <div className="space-y-2">
         {SURFACE_ROLES.map(({ key, label }) => {
@@ -92,7 +98,12 @@ export default function UploadZone({ uploads, onUpdate, onLoadSample }: Props) {
               </div>
 
               <div className="min-w-0 flex-1">
-                <div className="font-medium text-slate-300">{label}</div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-medium text-slate-300">{label}</span>
+                  {!entry && (
+                    <span className="text-[9px] text-slate-600">Optional</span>
+                  )}
+                </div>
                 {entry && (
                   <div className="truncate text-[10px] text-slate-500">
                     {entry.fileName}
@@ -132,9 +143,9 @@ export default function UploadZone({ uploads, onUpdate, onLoadSample }: Props) {
         >
           Load sample data
         </button>
-        {allAssigned && (
+        {canRun && (
           <span className="ml-auto text-[10px] text-emerald-400">
-            All surfaces assigned
+            {assignedCount === 5 ? 'All surfaces assigned' : 'Ready to run'}
           </span>
         )}
       </div>
