@@ -10,6 +10,10 @@ export default defineConfig(({ command }) => ({
     host: '0.0.0.0',
     port: 5173,
   },
+  worker: {
+    format: 'es',
+    plugins: () => [wasm(), topLevelAwait()],
+  },
   optimizeDeps: {
     exclude: ['spatial-engine'],
   },

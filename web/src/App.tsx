@@ -7,6 +7,7 @@ import type {
   ConformanceResult,
   TriSurface,
   Vec3,
+  DomainSolid,
   BoundaryRegion,
   ObjectStyle,
   MeasureTool,
@@ -14,7 +15,18 @@ import type {
   ViewerBackground,
 } from './types';
 import { DEFAULT_SETTINGS, SURFACE_ROLES } from './types';
-import { initWasm, runConformance, runConformanceWithBoundaries } from './wasm';
+import { initWasm, runConformance, runConformanceWithBoundaries, parseSurfaces } from './wasm';
+import {
+  initWorker,
+  workerParseSurface,
+  workerParseSurfaceJson,
+  workerRunConformance,
+  workerClearSurfaces,
+  workerRemoveSurface,
+  type FlatDomainSolid,
+  type FlatSurface,
+  type FlatConformanceResult,
+} from './workers/engineClient';
 import LandingPage from './components/LandingPage';
 import UploadZone from './components/UploadZone';
 import SettingsPanel from './components/SettingsPanel';
@@ -26,6 +38,8 @@ import CrossSectionPanel from './components/CrossSectionPanel';
 import ReportPanel from './components/report/ReportPanel';
 import { computeCrossSection } from './utils/crossSection';
 
+const DECIMATION_WARNING_THRESHOLD = 200_000;
+
 function makeFlatSurface(z: number, name: string, size = 20): TriSurface {
   const vertices: Vec3[] = [
     { x: 0, y: 0, z },
@@ -34,6 +48,75 @@ function makeFlatSurface(z: number, name: string, size = 20): TriSurface {
     { x: 0, y: size, z },
   ];
   return { name, vertices, indices: [[0, 1, 2], [0, 2, 3]] };
+}
+
+function flatToTriSurface(flat: FlatSurface): TriSurface {
+  const vertices: Vec3[] = [];
+  for (let i = 0; i < flat.vertexCount; i++) {
+    vertices.push({
+      x: flat.positions[i * 3],
+      y: flat.positions[i * 3 + 1],
+      z: flat.positions[i * 3 + 2],
+    });
+  }
+  const indices: [number, number, number][] = [];
+  for (let i = 0; i < flat.triangleCount; i++) {
+    indices.push([flat.indices[i * 3], flat.indices[i * 3 + 1], flat.indices[i * 3 + 2]]);
+  }
+  return { name: flat.name, vertices, indices };
+}
+
+function flatDomainToDomainSolid(d: FlatDomainSolid): DomainSolid {
+  const vertices: Vec3[] = [];
+  for (let i = 0; i < d.vertexCount; i++) {
+    vertices.push({
+      x: d.positions[i * 3],
+      y: d.positions[i * 3 + 1],
+      z: d.positions[i * 3 + 2],
+    });
+  }
+  const indices: [number, number, number][] = [];
+  for (let i = 0; i < d.triangleCount; i++) {
+    indices.push([d.indices[i * 3], d.indices[i * 3 + 1], d.indices[i * 3 + 2]]);
+  }
+  return {
+    domain: d.domain,
+    label: d.label,
+    color: d.color,
+    volume: d.volume,
+    block_name: d.block_name,
+    solid: {
+      label: d.label,
+      vertices,
+      indices,
+      volume: d.volume,
+      surface_area: d.surface_area,
+    },
+  };
+}
+
+function triSurfaceToFlat(surface: TriSurface, role: SurfaceRole, fileName: string): FlatSurface {
+  const positions = new Float64Array(surface.vertices.length * 3);
+  for (let i = 0; i < surface.vertices.length; i++) {
+    positions[i * 3] = surface.vertices[i].x;
+    positions[i * 3 + 1] = surface.vertices[i].y;
+    positions[i * 3 + 2] = surface.vertices[i].z;
+  }
+  const indices = new Uint32Array(surface.indices.length * 3);
+  for (let i = 0; i < surface.indices.length; i++) {
+    indices[i * 3] = surface.indices[i][0];
+    indices[i * 3 + 1] = surface.indices[i][1];
+    indices[i * 3 + 2] = surface.indices[i][2];
+  }
+  return {
+    name: surface.name,
+    role,
+    fileName,
+    positions,
+    indices,
+    vertexCount: surface.vertices.length,
+    triangleCount: surface.indices.length,
+  };
 }
 
 type MainTab = 'viewer' | 'reports';
@@ -54,12 +137,14 @@ function formatVolume(v: number): string {
 
 export default function App() {
   const [wasmReady, setWasmReady] = useState(false);
+  const [useWorker, setUseWorker] = useState(false);
   const [step, setStep] = useState<'landing' | 'workspace'>('landing');
   const [comparisonName, setComparisonName] = useState('');
   const [mode, setMode] = useState<Mode>('dig');
   const [uploads, setUploads] = useState<Map<SurfaceRole, UploadedSurface>>(new Map());
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [result, setResult] = useState<ConformanceResult | null>(null);
+  const [flatDomains, setFlatDomains] = useState<FlatDomainSolid[]>([]);
   const [visible, setVisible] = useState<Set<string>>(new Set());
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,8 +166,23 @@ export default function App() {
   const [measureTool, setMeasureTool] = useState<MeasureTool>('none');
   const [measurePoints, setMeasurePoints] = useState<MeasurePoint[]>([]);
 
+  const [showPerf, setShowPerf] = useState(false);
+  const [progress, setProgress] = useState<{ phase: string; value: number } | null>(null);
+  const [decimationWarnings, setDecimationWarnings] = useState<Map<SurfaceRole, number>>(new Map());
+
   useEffect(() => {
-    initWasm().then(() => setWasmReady(true));
+    const base = import.meta.env.BASE_URL ?? '/';
+    const wasmUrl = `${base}spatial_engine_bg.wasm`;
+
+    initWorker(wasmUrl)
+      .then(() => {
+        setUseWorker(true);
+        setWasmReady(true);
+      })
+      .catch(() => {
+        console.warn('Worker init failed, falling back to main thread');
+        initWasm().then(() => setWasmReady(true));
+      });
   }, []);
 
   useEffect(() => {
@@ -167,6 +267,70 @@ export default function App() {
     setStep('workspace');
   }, []);
 
+  const handleFileSelected = useCallback(
+    async (role: SurfaceRole, file: File) => {
+      try {
+        setProgress({ phase: 'parsing', value: 0.1 });
+
+        let flatSurface: FlatSurface;
+
+        if (file.name.endsWith('.json')) {
+          const text = await file.text();
+          if (useWorker) {
+            flatSurface = await workerParseSurfaceJson(role, text, file.name);
+          } else {
+            const surface = JSON.parse(text) as TriSurface;
+            surface.name = surface.name || file.name.replace(/\.[^.]+$/, '');
+            flatSurface = triSurfaceToFlat(surface, role, file.name);
+          }
+        } else {
+          const buffer = await file.arrayBuffer();
+          if (useWorker) {
+            flatSurface = await workerParseSurface(
+              role, buffer, file.name,
+              (phase, value) => setProgress({ phase, value }),
+            );
+          } else {
+            const data = new Uint8Array(buffer);
+            const surfaces = parseSurfaces(data);
+            if (surfaces.length === 0) {
+              setProgress(null);
+              alert(`No surfaces found in ${file.name}`);
+              return;
+            }
+            const surface = surfaces[0];
+            surface.name = surface.name || file.name.replace(/\.[^.]+$/, '');
+            flatSurface = triSurfaceToFlat(surface, role, file.name);
+          }
+        }
+
+        const triSurface = flatToTriSurface(flatSurface);
+        const next = new Map(uploads);
+        next.set(role, { role, surface: triSurface, fileName: file.name });
+        setUploads(next);
+
+        if (flatSurface.triangleCount > DECIMATION_WARNING_THRESHOLD) {
+          setDecimationWarnings(prev => {
+            const next = new Map(prev);
+            next.set(role, flatSurface.triangleCount);
+            return next;
+          });
+        } else {
+          setDecimationWarnings(prev => {
+            const next = new Map(prev);
+            next.delete(role);
+            return next;
+          });
+        }
+      } catch (e: any) {
+        setError(e.message || String(e));
+      } finally {
+        setProgress(null);
+      }
+    },
+    [useWorker, uploads],
+  );
+
   const handleLoadSample = useCallback(() => {
     const sampleSurfaces: Record<SurfaceRole, { z: number; label: string }> =
       mode === 'dig'
@@ -188,42 +352,101 @@ export default function App() {
     const next = new Map<SurfaceRole, UploadedSurface>();
     for (const { key } of SURFACE_ROLES) {
       const cfg = sampleSurfaces[key];
+      const surface = makeFlatSurface(cfg.z, cfg.label);
       next.set(key, {
         role: key,
-        surface: makeFlatSurface(cfg.z, cfg.label),
+        surface,
         fileName: `${cfg.label.toLowerCase().replace(/ /g, '_')}_sample.json`,
       });
+
+      if (useWorker) {
+        workerParseSurfaceJson(key, JSON.stringify(surface), `${cfg.label}_sample.json`).catch(() => {});
+      }
     }
     setUploads(next);
-  }, [mode]);
+    setDecimationWarnings(new Map());
+  }, [mode, useWorker]);
 
   const handleRun = useCallback(async () => {
     setError(null);
     setIsRunning(true);
     setResult(null);
-
-    await new Promise((r) => requestAnimationFrame(r));
+    setFlatDomains([]);
 
     try {
-      const surfaces: Partial<Record<string, TriSurface>> = {};
-      for (const { key } of SURFACE_ROLES) {
-        const entry = uploads.get(key);
-        if (entry) surfaces[key] = entry.surface;
+      if (useWorker) {
+        setProgress({ phase: 'conformance', value: 0.1 });
+
+        const flatResult = await workerRunConformance(
+          mode,
+          settings.minVolume,
+          settings.minThickness,
+          boundaries,
+          (phase, value) => setProgress({ phase, value }),
+        );
+
+        const domainSolids = flatResult.flatDomains.map(flatDomainToDomainSolid);
+        const conformanceResult: ConformanceResult = {
+          mode: flatResult.mode,
+          domains: domainSolids,
+          summary: flatResult.summary,
+        };
+
+        setFlatDomains(flatResult.flatDomains);
+        setResult(conformanceResult);
+        setVisible(new Set(conformanceResult.domains.map((d) => d.domain)));
+      } else {
+        await new Promise((r) => requestAnimationFrame(r));
+
+        const surfaces: Partial<Record<string, TriSurface>> = {};
+        for (const { key } of SURFACE_ROLES) {
+          const entry = uploads.get(key);
+          if (entry) surfaces[key] = entry.surface;
+        }
+
+        const res =
+          boundaries.length > 0
+            ? runConformanceWithBoundaries(surfaces, mode, settings.minVolume, settings.minThickness, boundaries)
+            : runConformance(surfaces, mode, settings.minVolume, settings.minThickness);
+
+        const flat: FlatDomainSolid[] = res.domains.map(d => {
+          const positions = new Float64Array(d.solid.vertices.length * 3);
+          for (let i = 0; i < d.solid.vertices.length; i++) {
+            positions[i * 3] = d.solid.vertices[i].x;
+            positions[i * 3 + 1] = d.solid.vertices[i].y;
+            positions[i * 3 + 2] = d.solid.vertices[i].z;
+          }
+          const indices = new Uint32Array(d.solid.indices.length * 3);
+          for (let i = 0; i < d.solid.indices.length; i++) {
+            indices[i * 3] = d.solid.indices[i][0];
+            indices[i * 3 + 1] = d.solid.indices[i][1];
+            indices[i * 3 + 2] = d.solid.indices[i][2];
+          }
+          return {
+            domain: d.domain,
+            label: d.label,
+            color: d.color,
+            volume: d.volume,
+            block_name: d.block_name,
+            positions,
+            indices,
+            vertexCount: d.solid.vertices.length,
+            triangleCount: d.solid.indices.length,
+            surface_area: d.solid.surface_area,
+          };
+        });
+
+        setFlatDomains(flat);
+        setResult(res);
+        setVisible(new Set(res.domains.map((d) => d.domain)));
       }
-
-      const res =
-        boundaries.length > 0
-          ? runConformanceWithBoundaries(surfaces, mode, settings.minVolume, settings.minThickness, boundaries)
-          : runConformance(surfaces, mode, settings.minVolume, settings.minThickness);
-
-      setResult(res);
-      setVisible(new Set(res.domains.map((d) => d.domain)));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsRunning(false);
+      setProgress(null);
     }
-  }, [uploads, mode, settings, boundaries]);
+  }, [uploads, mode, settings, boundaries, useWorker]);
 
   const handleToggle = useCallback((domain: string) => {
     setVisible((prev) => {
@@ -326,6 +549,36 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden">
+      {/* Progress bar */}
+      {(progress || isRunning) && (
+        <div className="absolute left-0 right-0 top-11 z-50 h-1 bg-slate-800">
+          <div
+            className="h-full bg-indigo-500 transition-all duration-300"
+            style={{ width: progress ? `${Math.max(progress.value * 100, 5)}%` : '100%' }}
+          />
+          {progress && (
+            <div className="absolute left-1/2 top-1.5 -translate-x-1/2 rounded bg-slate-900/90 px-2 py-0.5 text-[10px] text-slate-300">
+              {progress.phase === 'parsing' && 'Parsing surface...'}
+              {progress.phase === 'converting' && 'Preparing data...'}
+              {progress.phase === 'conformance' && 'Running conformance...'}
+              {progress.phase === 'transferring' && 'Transferring results...'}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Decimation warnings */}
+      {decimationWarnings.size > 0 && (
+        <div className="absolute left-64 right-0 top-12 z-40 bg-amber-900/90 px-4 py-1.5 text-xs text-amber-200">
+          <span className="font-medium">Large surface warning:</span>{' '}
+          {[...decimationWarnings.entries()].map(([role, count]) => {
+            const label = SURFACE_ROLES.find(r => r.key === role)?.label ?? role;
+            return `${label} (${(count / 1000).toFixed(0)}K triangles)`;
+          }).join(', ')}{' '}
+          exceed {(DECIMATION_WARNING_THRESHOLD / 1000).toFixed(0)}K triangles. LOD will auto-decimate during orbit.
+        </div>
+      )}
+
       {/* Header */}
       <header className="flex h-11 flex-shrink-0 items-center justify-between border-b border-slate-700 bg-slate-900 px-3">
         <div className="flex items-center gap-3">
@@ -334,6 +587,7 @@ export default function App() {
             onClick={() => {
               setStep('landing');
               setResult(null);
+              setFlatDomains([]);
               setUploads(new Map());
               setBoundaries([]);
               setMainTab('viewer');
@@ -343,6 +597,8 @@ export default function App() {
               setMeasurePoints([]);
               setSelectedId(null);
               setSelectionInfo(null);
+              setDecimationWarnings(new Map());
+              if (useWorker) workerClearSurfaces();
             }}
             className="text-sm text-slate-500 transition-colors hover:text-slate-300"
           >
@@ -398,6 +654,22 @@ export default function App() {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
                 </svg>
               )}
+            </button>
+
+            <div className="mx-1 h-4 w-px bg-slate-700" />
+
+            {/* Perf overlay toggle */}
+            <button
+              type="button"
+              onClick={() => setShowPerf(p => !p)}
+              className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                showPerf ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
+              }`}
+              title="Toggle FPS/Memory"
+            >
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
             </button>
 
             <div className="mx-1 h-4 w-px bg-slate-700" />
@@ -485,7 +757,12 @@ export default function App() {
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar */}
         <aside className="flex w-64 flex-shrink-0 flex-col overflow-y-auto bg-sidebar text-slate-200 scrollbar-thin">
-          <UploadZone uploads={uploads} onUpdate={setUploads} onLoadSample={handleLoadSample} />
+          <UploadZone
+            uploads={uploads}
+            onFileSelected={handleFileSelected}
+            onLoadSample={handleLoadSample}
+            decimationWarnings={decimationWarnings}
+          />
           <SettingsPanel settings={settings} onChange={setSettings} />
           <BoundaryPanel
             boundaries={boundaries}
@@ -587,7 +864,7 @@ export default function App() {
                   <div className={crossSectionData ? 'h-[60%]' : 'h-full'} style={{ minHeight: 0 }}>
                     <Viewer
                       ref={viewerRef}
-                      result={result}
+                      flatDomains={flatDomains}
                       visible={visible}
                       canvasRef={canvasRef}
                       boundaries={boundaries}
@@ -608,6 +885,7 @@ export default function App() {
                       measureTool={measureTool}
                       measurePoints={measurePoints}
                       onAddMeasurePoint={handleAddMeasurePoint}
+                      showPerf={showPerf}
                     />
                   </div>
                   {crossSectionData && (
