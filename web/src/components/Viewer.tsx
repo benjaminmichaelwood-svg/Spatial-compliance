@@ -574,54 +574,54 @@ interface DrawingLayerProps {
   points: [number, number][];
   isDrawing: boolean;
   onAddPoint: (x: number, y: number) => void;
+  onFinish: () => void;
+  displayZ: number;
+  sphereRadius: number;
 }
 
-function DrawingLayer({ points, isDrawing, onAddPoint }: DrawingLayerProps) {
-  const { camera, gl, raycaster } = useThree();
+function DrawingLayer({ points, isDrawing, onAddPoint, onFinish, displayZ, sphereRadius }: DrawingLayerProps) {
+  const lastClickRef = useRef(0);
 
   const handleClick = useCallback(
     (e: any) => {
       if (!isDrawing) return;
       e.stopPropagation();
-      if (e.point) {
-        onAddPoint(e.point.x, e.point.y);
+      const now = Date.now();
+      if (now - lastClickRef.current < 350 && points.length >= 3) {
+        lastClickRef.current = 0;
+        onFinish();
         return;
       }
-      const rect = gl.domElement.getBoundingClientRect();
-      const mouse = new THREE.Vector2(
-        ((e.clientX - rect.left) / rect.width) * 2 - 1,
-        -((e.clientY - rect.top) / rect.height) * 2 + 1,
-      );
-      raycaster.setFromCamera(mouse, camera);
-      const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-      const pt = new THREE.Vector3();
-      raycaster.ray.intersectPlane(plane, pt);
-      if (pt) {
-        onAddPoint(pt.x, pt.y);
+      lastClickRef.current = now;
+      if (e.point) {
+        onAddPoint(e.point.x, e.point.y);
       }
     },
-    [isDrawing, camera, gl, raycaster, onAddPoint],
+    [isDrawing, onAddPoint, onFinish, points.length],
   );
 
   if (!isDrawing && points.length === 0) return null;
 
-  const linePoints: [number, number, number][] = points.map(([x, y]) => [x, y, 0.5]);
+  const z = displayZ + sphereRadius;
+  const linePoints: [number, number, number][] = points.map(([x, y]) => [x, y, z]);
   if (points.length > 1) {
-    linePoints.push([points[0][0], points[0][1], 0.5]);
+    linePoints.push([points[0][0], points[0][1], z]);
   }
 
   return (
     <>
-      <mesh visible={false} onClick={handleClick as any} position={[0, 0, 0]}>
-        <planeGeometry args={[100000, 100000]} />
-        <meshBasicMaterial transparent opacity={0} />
-      </mesh>
+      {isDrawing && (
+        <mesh visible={false} onClick={handleClick} position={[0, 0, displayZ]}>
+          <planeGeometry args={[100000, 100000]} />
+          <meshBasicMaterial transparent opacity={0} />
+        </mesh>
+      )}
       {linePoints.length >= 2 && (
         <Line points={linePoints} color="#f97316" lineWidth={2} />
       )}
       {points.map(([x, y], i) => (
-        <mesh key={i} position={[x, y, 0.5]}>
-          <sphereGeometry args={[0.4, 8, 8]} />
+        <mesh key={i} position={[x, y, z]}>
+          <sphereGeometry args={[sphereRadius * 0.6, 12, 12]} />
           <meshBasicMaterial color="#f97316" />
         </mesh>
       ))}
@@ -754,14 +754,14 @@ function SectionLineOverlay({
   );
 }
 
-function BoundaryLines({ boundaries }: { boundaries: BoundaryRegion[] }) {
+function BoundaryLines({ boundaries, displayZ }: { boundaries: BoundaryRegion[]; displayZ: number }) {
   const colors = ['#06b6d4', '#8b5cf6', '#ec4899', '#10b981', '#f59e0b'];
   return (
     <>
       {boundaries.map((b, i) => {
         const pts: [number, number, number][] = [
-          ...b.polygon.map(([x, y]) => [x, y, 0.3] as [number, number, number]),
-          [b.polygon[0][0], b.polygon[0][1], 0.3],
+          ...b.polygon.map(([x, y]) => [x, y, displayZ] as [number, number, number]),
+          [b.polygon[0][0], b.polygon[0][1], displayZ],
         ];
         return <Line key={i} points={pts} color={colors[i % colors.length]} lineWidth={1.5} />;
       })}
@@ -777,12 +777,15 @@ function ControlsBinder({ controlsRef }: { controlsRef: React.MutableRefObject<a
   return null;
 }
 
-function ClickToPivot({ controlsRef }: { controlsRef: React.MutableRefObject<any> }) {
+function ClickToPivot({ controlsRef, disabled }: { controlsRef: React.MutableRefObject<any>; disabled?: boolean }) {
   const { camera, gl, raycaster, scene } = useThree();
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
 
   useEffect(() => {
     const canvas = gl.domElement;
     const onDblClick = (e: MouseEvent) => {
+      if (disabledRef.current) return;
       const rect = canvas.getBoundingClientRect();
       const mouse = new THREE.Vector2(
         ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -925,6 +928,7 @@ export interface ViewerProps {
   isDrawing: boolean;
   drawPoints: [number, number][];
   onAddDrawPoint: (x: number, y: number) => void;
+  onFinishDrawing: () => void;
   uploads: Map<SurfaceRole, UploadedSurface>;
   surfaceVisible: Set<SurfaceRole>;
   isDrawingSection: boolean;
@@ -943,7 +947,7 @@ export interface ViewerProps {
 }
 
 const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
-  flatDomains, visible, canvasRef, boundaries, isDrawing, drawPoints, onAddDrawPoint,
+  flatDomains, visible, canvasRef, boundaries, isDrawing, drawPoints, onAddDrawPoint, onFinishDrawing,
   uploads, surfaceVisible, isDrawingSection, sectionLine, onSectionLineChange,
   onSectionDrawComplete, background, domainStyles, surfaceStyles, selectedId,
   onSelect, measureTool, measurePoints, onAddMeasurePoint, showPerf,
@@ -1129,8 +1133,8 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           sphereRadius={sphereRadius}
         />
 
-        <BoundaryLines boundaries={boundaries} />
-        <DrawingLayer points={drawPoints} isDrawing={isDrawing} onAddPoint={onAddDrawPoint} />
+        <BoundaryLines boundaries={boundaries} displayZ={displayZ} />
+        <DrawingLayer points={drawPoints} isDrawing={isDrawing} onAddPoint={onAddDrawPoint} onFinish={onFinishDrawing} displayZ={displayZ} sphereRadius={sphereRadius} />
 
         <MeasureOverlay3D points={measurePoints} tool={measureTool} />
 
@@ -1167,7 +1171,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           minPolarAngle={0}
         />
         <ControlsBinder controlsRef={controlsRef} />
-        <ClickToPivot controlsRef={controlsRef} />
+        <ClickToPivot controlsRef={controlsRef} disabled={isDrawing} />
         <KeyboardShortcuts controlsRef={controlsRef} flatDomains={flatDomains} uploads={uploads} />
       </Canvas>
 

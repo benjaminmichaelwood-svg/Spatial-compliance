@@ -215,8 +215,11 @@ export default function App() {
 
   const finishDrawing = useCallback(() => {
     if (drawPoints.length >= 3) {
-      const name = `Region ${boundaries.length + 1}`;
-      setBoundaries((prev) => [...prev, { name, polygon: drawPoints }]);
+      const defaultName = `Region ${boundaries.length + 1}`;
+      const name = window.prompt('Name this boundary region:', defaultName);
+      if (name !== null) {
+        setBoundaries((prev) => [...prev, { name: name || defaultName, polygon: drawPoints }]);
+      }
     }
     setIsDrawing(false);
     setDrawPoints([]);
@@ -235,6 +238,20 @@ export default function App() {
     setMeasurePoints([]);
   }, []);
 
+  const snapDist = useMemo(() => {
+    let maxDim = 100;
+    for (const d of flatDomains) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (let i = 0; i < d.vertexCount; i++) {
+        const x = d.positions[i * 3], y = d.positions[i * 3 + 1];
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+      maxDim = Math.max(maxDim, maxX - minX, maxY - minY);
+    }
+    return maxDim * 0.01;
+  }, [flatDomains]);
+
   const handleAddDrawPoint = useCallback(
     (x: number, y: number) => {
       if (!isDrawing) return;
@@ -242,7 +259,7 @@ export default function App() {
         if (prev.length >= 3) {
           const [fx, fy] = prev[0];
           const dist = Math.sqrt((x - fx) ** 2 + (y - fy) ** 2);
-          if (dist < 1.0) {
+          if (dist < snapDist) {
             setTimeout(() => finishDrawing(), 0);
             return prev;
           }
@@ -250,7 +267,7 @@ export default function App() {
         return [...prev, [x, y]];
       });
     },
-    [isDrawing, finishDrawing],
+    [isDrawing, finishDrawing, snapDist],
   );
 
   const handleStart = useCallback((name: string, m: Mode) => {
@@ -850,6 +867,7 @@ export default function App() {
                       isDrawing={isDrawing}
                       drawPoints={drawPoints}
                       onAddDrawPoint={handleAddDrawPoint}
+                      onFinishDrawing={finishDrawing}
                       uploads={uploads}
                       surfaceVisible={surfaceVisible}
                       isDrawingSection={isDrawingSection}
