@@ -851,16 +851,23 @@ export default function App() {
         <main className="flex flex-1 overflow-hidden">
           <div className="flex-1 overflow-hidden">
             {result ? (
-              mainTab === 'reports' ? (
-                <ReportPanel
-                  result={result}
-                  mode={mode}
-                  boundaries={boundaries}
-                  comparisonName={comparisonName}
-                  canvasRef={canvasRef}
-                />
-              ) : (
-                <div className="flex h-full flex-col">
+              <>
+                <div
+                  style={{ display: mainTab === 'reports' ? 'block' : 'none' }}
+                  className="h-full overflow-hidden"
+                >
+                  <ReportPanel
+                    result={result}
+                    mode={mode}
+                    boundaries={boundaries}
+                    comparisonName={comparisonName}
+                    canvasRef={canvasRef}
+                  />
+                </div>
+                <div
+                  style={{ display: mainTab === 'viewer' ? 'flex' : 'none' }}
+                  className="h-full flex-col"
+                >
                   <div className={crossSectionData ? 'h-[60%]' : 'h-full'} style={{ minHeight: 0 }}>
                     <Viewer
                       ref={viewerRef}
@@ -894,7 +901,7 @@ export default function App() {
                     </div>
                   )}
                 </div>
-              )
+              </>
             ) : (
               <div className="flex h-full items-center justify-center bg-slate-900">
                 <div className="text-center">

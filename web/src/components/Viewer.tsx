@@ -81,6 +81,7 @@ interface SurfaceMeshProps {
 
 function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect }: SurfaceMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
+  const matRef = useRef<THREE.MeshPhysicalMaterial>(null);
   const geometry = useMemo(() => {
     const verts = upload.surface.vertices;
     const idxs = upload.surface.indices;
@@ -109,12 +110,20 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect }
   const showWireframe = style.wireframe && canWireframe;
 
   const roleLabel = SURFACE_ROLES.find((r) => r.key === upload.role)?.label ?? upload.role;
-  const color = useMemo(() => new THREE.Color(style.color), [style.color]);
-  const highlightColor = useMemo(() => {
+
+  useEffect(() => {
+    const mat = matRef.current;
+    if (!mat) return;
     const c = new THREE.Color(style.color);
-    c.lerp(new THREE.Color('#ffffff'), 0.3);
-    return c;
-  }, [style.color]);
+    if (highlighted) c.lerp(new THREE.Color('#ffffff'), 0.3);
+    mat.color.copy(c);
+    mat.opacity = style.opacity;
+    mat.wireframe = showWireframe;
+    mat.clearcoat = selected ? 0.3 : 0;
+    mat.emissive.set(selected ? '#fbbf24' : '#000000');
+    mat.emissiveIntensity = selected ? 0.15 : 0;
+    mat.needsUpdate = false;
+  }, [style.color, style.opacity, showWireframe, selected, highlighted]);
 
   const id = `surface-${upload.role}`;
 
@@ -147,17 +156,12 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect }
       }}
     >
       <meshPhysicalMaterial
-        color={highlighted ? highlightColor : color}
+        ref={matRef}
         side={THREE.DoubleSide}
         transparent
-        opacity={style.opacity}
         roughness={0.5}
         metalness={0.05}
         envMapIntensity={0.4}
-        clearcoat={selected ? 0.3 : 0}
-        wireframe={showWireframe}
-        emissive={selected ? '#fbbf24' : '#000000'}
-        emissiveIntensity={selected ? 0.15 : 0}
       />
     </mesh>
   );
@@ -211,6 +215,7 @@ function BatchedDomainGroup({
   domain, solids, visible, style, selected, highlighted, lodLevel, onHover, onSelect,
 }: DomainGroupProps) {
   const meshRef = useRef<THREE.Mesh>(null);
+  const matRef = useRef<THREE.MeshPhysicalMaterial>(null);
 
   const { fullGeo, triRanges, lodGeos } = useMemo(() => {
     const { geometry: full, triRanges: ranges } = buildBatchedGeometry(solids);
@@ -256,12 +261,19 @@ function BatchedDomainGroup({
   const canWireframe = totalTris <= WIREFRAME_TRI_LIMIT;
   const showWireframe = style.wireframe && canWireframe;
 
-  const color = useMemo(() => new THREE.Color(style.color), [style.color]);
-  const highlightColor = useMemo(() => {
+  useEffect(() => {
+    const mat = matRef.current;
+    if (!mat) return;
     const c = new THREE.Color(style.color);
-    c.lerp(new THREE.Color('#ffffff'), 0.25);
-    return c;
-  }, [style.color]);
+    if (highlighted) c.lerp(new THREE.Color('#ffffff'), 0.25);
+    mat.color.copy(c);
+    mat.opacity = style.opacity;
+    mat.wireframe = showWireframe;
+    mat.clearcoat = selected ? 0.3 : 0;
+    mat.emissive.set(selected ? '#fbbf24' : '#000000');
+    mat.emissiveIntensity = selected ? 0.15 : 0;
+    mat.needsUpdate = false;
+  }, [style.color, style.opacity, showWireframe, selected, highlighted]);
 
   const findSolid = useCallback((faceIndex: number) => {
     for (const range of triRanges) {
@@ -310,17 +322,12 @@ function BatchedDomainGroup({
       }}
     >
       <meshPhysicalMaterial
-        color={highlighted ? highlightColor : color}
+        ref={matRef}
         side={THREE.DoubleSide}
         transparent
-        opacity={style.opacity}
         roughness={0.5}
         metalness={0.05}
         envMapIntensity={0.4}
-        clearcoat={selected ? 0.3 : 0}
-        wireframe={showWireframe}
-        emissive={selected ? '#fbbf24' : '#000000'}
-        emissiveIntensity={selected ? 0.15 : 0}
       />
     </mesh>
   );
@@ -699,6 +706,103 @@ function ControlsBinder({ controlsRef }: { controlsRef: React.MutableRefObject<a
   return null;
 }
 
+function ClickToPivot({ controlsRef }: { controlsRef: React.MutableRefObject<any> }) {
+  const { camera, gl, raycaster, scene } = useThree();
+
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const onDblClick = (e: MouseEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      raycaster.setFromCamera(mouse, camera);
+      const meshes: THREE.Mesh[] = [];
+      scene.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh && obj.visible) meshes.push(obj as THREE.Mesh);
+      });
+      const intersects = raycaster.intersectObjects(meshes, false);
+      if (intersects.length > 0 && controlsRef.current) {
+        controlsRef.current.target.copy(intersects[0].point);
+        controlsRef.current.update();
+      }
+    };
+    canvas.addEventListener('dblclick', onDblClick);
+    return () => canvas.removeEventListener('dblclick', onDblClick);
+  }, [camera, gl, raycaster, scene, controlsRef]);
+
+  return null;
+}
+
+function KeyboardShortcuts({
+  controlsRef,
+  flatDomains,
+  uploads,
+}: {
+  controlsRef: React.MutableRefObject<any>;
+  flatDomains: FlatDomainSolid[];
+  uploads: Map<SurfaceRole, UploadedSurface>;
+}) {
+  const { camera } = useThree();
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if (e.key === 'z' && !e.ctrlKey && !e.metaKey) {
+        camera.up.set(0, 0, 1);
+        camera.updateProjectionMatrix();
+        if (controlsRef.current) controlsRef.current.update();
+        return;
+      }
+
+      if (e.key === 'f' && !e.ctrlKey && !e.metaKey) {
+        const box = new THREE.Box3();
+        for (const d of flatDomains) {
+          for (let i = 0; i < d.vertexCount; i++) {
+            box.expandByPoint(new THREE.Vector3(d.positions[i * 3], d.positions[i * 3 + 1], d.positions[i * 3 + 2]));
+          }
+        }
+        for (const [, upload] of uploads) {
+          for (const v of upload.surface.vertices) {
+            box.expandByPoint(new THREE.Vector3(v.x, v.y, v.z));
+          }
+        }
+        if (box.isEmpty()) return;
+
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const cam = camera as THREE.PerspectiveCamera;
+        const fov = cam.fov * (Math.PI / 180);
+        const aspect = cam.aspect;
+        const fitDist = Math.max(
+          maxDim / (2 * Math.tan(fov / 2)),
+          maxDim / (2 * Math.tan(fov * aspect / 2)),
+        ) * 1.2;
+
+        camera.position.set(
+          center.x + fitDist * 0.5,
+          center.y - fitDist * 0.5,
+          center.z + fitDist * 0.4,
+        );
+        camera.lookAt(center);
+        camera.updateProjectionMatrix();
+
+        if (controlsRef.current?.target) {
+          controlsRef.current.target.copy(center);
+          controlsRef.current.update();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [camera, controlsRef, flatDomains, uploads]);
+
+  return null;
+}
+
 function CursorElevation({
   onUpdate,
 }: {
@@ -708,7 +812,11 @@ function CursorElevation({
 
   useEffect(() => {
     const canvas = gl.domElement;
+    let lastTime = 0;
     const onMove = (e: MouseEvent) => {
+      const now = performance.now();
+      if (now - lastTime < 16) return;
+      lastTime = now;
       const rect = canvas.getBoundingClientRect();
       const mouse = new THREE.Vector2(
         ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -956,14 +1064,18 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           dampingFactor={0.1}
           enabled={!isDrawing && !isDrawingSection && !isDraggingEndpoint && measureTool === 'none'}
           mouseButtons={{
-            LEFT: -1 as any,
-            MIDDLE: THREE.MOUSE.ROTATE,
+            LEFT: THREE.MOUSE.ROTATE,
+            MIDDLE: THREE.MOUSE.PAN,
             RIGHT: THREE.MOUSE.PAN,
           }}
           enableZoom
           zoomSpeed={1.2}
+          maxPolarAngle={Math.PI}
+          minPolarAngle={0}
         />
         <ControlsBinder controlsRef={controlsRef} />
+        <ClickToPivot controlsRef={controlsRef} />
+        <KeyboardShortcuts controlsRef={controlsRef} flatDomains={flatDomains} uploads={uploads} />
       </Canvas>
 
       {/* Tooltip */}

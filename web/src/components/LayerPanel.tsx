@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import type { ConformanceResult, SurfaceRole, UploadedSurface, ObjectStyle } from '../types';
 import { SURFACE_ROLES } from '../types';
 
@@ -36,12 +36,31 @@ function StyleControls({
   style: ObjectStyle;
   onChange: (s: ObjectStyle) => void;
 }) {
+  const [localOpacity, setLocalOpacity] = useState(Math.round(style.opacity * 100));
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const colorDebounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  const debouncedOpacity = useCallback((value: number) => {
+    setLocalOpacity(value);
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      onChange({ ...style, opacity: value / 100 });
+    }, 100);
+  }, [style, onChange]);
+
+  const debouncedColor = useCallback((color: string) => {
+    clearTimeout(colorDebounceRef.current);
+    colorDebounceRef.current = setTimeout(() => {
+      onChange({ ...style, color });
+    }, 100);
+  }, [style, onChange]);
+
   return (
     <div className="mt-1.5 flex items-center gap-2 pl-5">
       <input
         type="color"
         value={style.color}
-        onChange={(e) => onChange({ ...style, color: e.target.value })}
+        onChange={(e) => debouncedColor(e.target.value)}
         className="h-5 w-5 cursor-pointer rounded border-0 bg-transparent p-0"
         title="Color"
       />
@@ -49,12 +68,12 @@ function StyleControls({
         type="range"
         min={0}
         max={100}
-        value={Math.round(style.opacity * 100)}
-        onChange={(e) => onChange({ ...style, opacity: Number(e.target.value) / 100 })}
+        value={localOpacity}
+        onChange={(e) => debouncedOpacity(Number(e.target.value))}
         className="h-1 w-16 cursor-pointer appearance-none rounded-full bg-slate-600 accent-indigo-400"
-        title={`Opacity: ${Math.round(style.opacity * 100)}%`}
+        title={`Opacity: ${localOpacity}%`}
       />
-      <span className="text-[9px] text-slate-500 w-7">{Math.round(style.opacity * 100)}%</span>
+      <span className="text-[9px] text-slate-500 w-7">{localOpacity}%</span>
       <button
         type="button"
         onClick={() => onChange({ ...style, wireframe: !style.wireframe })}
