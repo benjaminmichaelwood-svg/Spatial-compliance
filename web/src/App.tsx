@@ -12,6 +12,7 @@ import type {
   ObjectStyle,
   MeasureTool,
   ViewerBackground,
+  SolidMesh,
 } from './types';
 import { DEFAULT_SETTINGS, SURFACE_ROLES } from './types';
 import { initWasm, runConformance, runConformanceWithBoundaries, parseSurfaces } from './wasm';
@@ -38,63 +39,25 @@ import ReportPanel from './components/report/ReportPanel';
 import { computeCrossSection } from './utils/crossSection';
 
 
-function makeFlatSurface(z: number, name: string, size = 20): TriSurface {
-  const vertices: Vec3[] = [
-    { x: 0, y: 0, z },
-    { x: size, y: 0, z },
-    { x: size, y: size, z },
-    { x: 0, y: size, z },
-  ];
-  return { name, vertices, indices: [[0, 1, 2], [0, 2, 3]] };
+function makeSampleUpload(z: number, name: string, role: SurfaceRole, fileName: string, size = 20): UploadedSurface {
+  const positions = new Float32Array([0, 0, z, size, 0, z, size, size, z, 0, size, z]);
+  const indices = new Uint32Array([0, 1, 2, 0, 2, 3]);
+  return { role, fileName, name, positions, indices, vertexCount: 4, triangleCount: 2 };
 }
 
-function flatToTriSurface(flat: FlatSurface): TriSurface {
-  const vertices: Vec3[] = [];
-  for (let i = 0; i < flat.vertexCount; i++) {
-    vertices.push({
-      x: flat.positions[i * 3],
-      y: flat.positions[i * 3 + 1],
-      z: flat.positions[i * 3 + 2],
-    });
-  }
-  const indices: [number, number, number][] = [];
-  for (let i = 0; i < flat.triangleCount; i++) {
-    indices.push([flat.indices[i * 3], flat.indices[i * 3 + 1], flat.indices[i * 3 + 2]]);
-  }
-  return { name: flat.name, vertices, indices };
-}
-
-function flatDomainToDomainSolid(d: FlatDomainSolid): DomainSolid {
-  const vertices: Vec3[] = [];
-  for (let i = 0; i < d.vertexCount; i++) {
-    vertices.push({
-      x: d.positions[i * 3],
-      y: d.positions[i * 3 + 1],
-      z: d.positions[i * 3 + 2],
-    });
-  }
-  const indices: [number, number, number][] = [];
-  for (let i = 0; i < d.triangleCount; i++) {
-    indices.push([d.indices[i * 3], d.indices[i * 3 + 1], d.indices[i * 3 + 2]]);
-  }
+function flatDomainToLightDomainSolid(d: FlatDomainSolid): DomainSolid {
   return {
     domain: d.domain,
     label: d.label,
     color: d.color,
     volume: d.volume,
     block_name: d.block_name,
-    solid: {
-      label: d.label,
-      vertices,
-      indices,
-      volume: d.volume,
-      surface_area: d.surface_area,
-    },
+    solid: { label: d.label, vertices: [], indices: [], volume: d.volume, surface_area: d.surface_area },
   };
 }
 
-function triSurfaceToFlat(surface: TriSurface, role: SurfaceRole, fileName: string): FlatSurface {
-  const positions = new Float64Array(surface.vertices.length * 3);
+function triSurfaceToUpload(surface: TriSurface, role: SurfaceRole, fileName: string): UploadedSurface {
+  const positions = new Float32Array(surface.vertices.length * 3);
   for (let i = 0; i < surface.vertices.length; i++) {
     positions[i * 3] = surface.vertices[i].x;
     positions[i * 3 + 1] = surface.vertices[i].y;
@@ -106,15 +69,7 @@ function triSurfaceToFlat(surface: TriSurface, role: SurfaceRole, fileName: stri
     indices[i * 3 + 1] = surface.indices[i][1];
     indices[i * 3 + 2] = surface.indices[i][2];
   }
-  return {
-    name: surface.name,
-    role,
-    fileName,
-    positions,
-    indices,
-    vertexCount: surface.vertices.length,
-    triangleCount: surface.indices.length,
-  };
+  return { name: surface.name, role, fileName, positions, indices, vertexCount: surface.vertices.length, triangleCount: surface.indices.length };
 }
 
 type MainTab = 'viewer' | 'reports';
@@ -282,24 +237,26 @@ export default function App() {
       try {
         setProgress({ phase: 'parsing', value: 0.1 });
 
-        let flatSurface: FlatSurface;
+        let upload: UploadedSurface;
 
         if (file.name.endsWith('.json')) {
           const text = await file.text();
           if (useWorker) {
-            flatSurface = await workerParseSurfaceJson(role, text, file.name);
+            const flat = await workerParseSurfaceJson(role, text, file.name);
+            upload = { role, fileName: file.name, name: flat.name, positions: flat.positions, indices: flat.indices, vertexCount: flat.vertexCount, triangleCount: flat.triangleCount };
           } else {
             const surface = JSON.parse(text) as TriSurface;
             surface.name = surface.name || file.name.replace(/\.[^.]+$/, '');
-            flatSurface = triSurfaceToFlat(surface, role, file.name);
+            upload = triSurfaceToUpload(surface, role, file.name);
           }
         } else {
           const buffer = await file.arrayBuffer();
           if (useWorker) {
-            flatSurface = await workerParseSurface(
+            const flat = await workerParseSurface(
               role, buffer, file.name,
               (phase, value) => setProgress({ phase, value }),
             );
+            upload = { role, fileName: file.name, name: flat.name, positions: flat.positions, indices: flat.indices, vertexCount: flat.vertexCount, triangleCount: flat.triangleCount };
           } else {
             const data = new Uint8Array(buffer);
             const surfaces = parseSurfaces(data);
@@ -310,14 +267,14 @@ export default function App() {
             }
             const surface = surfaces[0];
             surface.name = surface.name || file.name.replace(/\.[^.]+$/, '');
-            flatSurface = triSurfaceToFlat(surface, role, file.name);
+            upload = triSurfaceToUpload(surface, role, file.name);
           }
         }
 
-        const triSurface = flatToTriSurface(flatSurface);
         const next = new Map(uploads);
-        next.set(role, { role, surface: triSurface, fileName: file.name });
+        next.set(role, upload);
         setUploads(next);
+        setSurfaceVisible(prev => new Set([...prev, role]));
 
       } catch (e: any) {
         setError(e.message || String(e));
@@ -349,18 +306,23 @@ export default function App() {
     const next = new Map<SurfaceRole, UploadedSurface>();
     for (const { key } of SURFACE_ROLES) {
       const cfg = sampleSurfaces[key];
-      const surface = makeFlatSurface(cfg.z, cfg.label);
-      next.set(key, {
-        role: key,
-        surface,
-        fileName: `${cfg.label.toLowerCase().replace(/ /g, '_')}_sample.json`,
-      });
+      const fn = `${cfg.label.toLowerCase().replace(/ /g, '_')}_sample.json`;
+      next.set(key, makeSampleUpload(cfg.z, cfg.label, key, fn));
 
       if (useWorker) {
-        workerParseSurfaceJson(key, JSON.stringify(surface), `${cfg.label}_sample.json`).catch(() => {});
+        const surface: TriSurface = {
+          name: cfg.label,
+          vertices: [
+            { x: 0, y: 0, z: cfg.z }, { x: 20, y: 0, z: cfg.z },
+            { x: 20, y: 20, z: cfg.z }, { x: 0, y: 20, z: cfg.z },
+          ],
+          indices: [[0, 1, 2], [0, 2, 3]],
+        };
+        workerParseSurfaceJson(key, JSON.stringify(surface), fn).catch(() => {});
       }
     }
     setUploads(next);
+    setSurfaceVisible(new Set(SURFACE_ROLES.map(r => r.key)));
   }, [mode, useWorker]);
 
   const handleRun = useCallback(async () => {
@@ -381,7 +343,7 @@ export default function App() {
           (phase, value) => setProgress({ phase, value }),
         );
 
-        const domainSolids = flatResult.flatDomains.map(flatDomainToDomainSolid);
+        const domainSolids = flatResult.flatDomains.map(flatDomainToLightDomainSolid);
         const conformanceResult: ConformanceResult = {
           mode: flatResult.mode,
           domains: domainSolids,
@@ -397,7 +359,17 @@ export default function App() {
         const surfaces: Partial<Record<string, TriSurface>> = {};
         for (const { key } of SURFACE_ROLES) {
           const entry = uploads.get(key);
-          if (entry) surfaces[key] = entry.surface;
+          if (entry) {
+            const verts: Vec3[] = [];
+            for (let i = 0; i < entry.vertexCount; i++) {
+              verts.push({ x: entry.positions[i * 3], y: entry.positions[i * 3 + 1], z: entry.positions[i * 3 + 2] });
+            }
+            const idxs: [number, number, number][] = [];
+            for (let i = 0; i < entry.triangleCount; i++) {
+              idxs.push([entry.indices[i * 3], entry.indices[i * 3 + 1], entry.indices[i * 3 + 2]]);
+            }
+            surfaces[key] = { name: entry.name, vertices: verts, indices: idxs };
+          }
         }
 
         const res =
@@ -406,7 +378,7 @@ export default function App() {
             : runConformance(surfaces, mode, settings.minVolume, settings.minThickness);
 
         const flat: FlatDomainSolid[] = res.domains.map(d => {
-          const positions = new Float64Array(d.solid.vertices.length * 3);
+          const positions = new Float32Array(d.solid.vertices.length * 3);
           for (let i = 0; i < d.solid.vertices.length; i++) {
             positions[i * 3] = d.solid.vertices[i].x;
             positions[i * 3 + 1] = d.solid.vertices[i].y;
@@ -567,6 +539,9 @@ export default function App() {
               {progress.phase === 'converting' && 'Preparing data...'}
               {progress.phase === 'conformance' && 'Running conformance...'}
               {progress.phase === 'transferring' && 'Transferring results...'}
+              {progress.phase === 'Preparing surfaces' && 'Preparing surfaces...'}
+              {progress.phase === 'Computing conformance' && 'Computing conformance...'}
+              {progress.phase === 'Transferring results' && 'Transferring results...'}
             </div>
           )}
         </div>

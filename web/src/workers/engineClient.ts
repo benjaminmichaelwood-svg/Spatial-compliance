@@ -4,7 +4,7 @@ export interface FlatSurface {
   name: string;
   role: SurfaceRole;
   fileName: string;
-  positions: Float64Array;
+  positions: Float32Array;
   indices: Uint32Array;
   vertexCount: number;
   triangleCount: number;
@@ -16,7 +16,7 @@ export interface FlatDomainSolid {
   color: string;
   volume: number;
   block_name?: string;
-  positions: Float64Array;
+  positions: Float32Array;
   indices: Uint32Array;
   vertexCount: number;
   triangleCount: number;

@@ -5,7 +5,7 @@ use crate::classify::{classify_conformance, ConformanceInput, Mode};
 use crate::cutfill::{compute_cut_fill, SliverFilter};
 use crate::dxf::parse_dxf_polygons;
 use crate::format::{decode_surface, decode_surfaces, encode_surfaces};
-use crate::types::{BoundaryRegion, TriSurface};
+use crate::types::{BoundaryRegion, TriSurface, Vec3};
 
 #[wasm_bindgen]
 pub fn parse_surfaces(data: &[u8]) -> Result<JsValue, JsValue> {
@@ -233,4 +233,139 @@ pub fn encode_surfaces_from_json(surfaces_json: &str) -> Result<Vec<u8>, JsValue
     let surfaces: Vec<TriSurface> =
         serde_json::from_str(surfaces_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(encode_surfaces(&surfaces))
+}
+
+fn flatten_vertices(vertices: &[Vec3]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(vertices.len() * 3);
+    for v in vertices {
+        out.push(v.x as f32);
+        out.push(v.y as f32);
+        out.push(v.z as f32);
+    }
+    out
+}
+
+fn flatten_indices(indices: &[[u32; 3]]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(indices.len() * 3);
+    for tri in indices {
+        out.push(tri[0]);
+        out.push(tri[1]);
+        out.push(tri[2]);
+    }
+    out
+}
+
+#[wasm_bindgen]
+pub fn run_conformance_flat(
+    production_start_json: &str,
+    production_end_json: &str,
+    schedule_start_json: &str,
+    schedule_end_json: &str,
+    schedule_future_json: &str,
+    mode: &str,
+    min_volume: f64,
+    min_thickness: f64,
+    boundaries_json: &str,
+) -> Result<JsValue, JsValue> {
+    let ps = parse_optional_surface(production_start_json)?;
+    let pe = parse_optional_surface(production_end_json)?;
+    let ss = parse_optional_surface(schedule_start_json)?;
+    let se = parse_optional_surface(schedule_end_json)?;
+    let sf = parse_optional_surface(schedule_future_json)?;
+
+    let boundaries: Vec<BoundaryRegion> = if boundaries_json.is_empty() {
+        vec![]
+    } else {
+        serde_json::from_str(boundaries_json).map_err(|e| JsValue::from_str(&e.to_string()))?
+    };
+
+    let mode = match mode {
+        "dig" => Mode::Dig,
+        "dump" => Mode::Dump,
+        _ => return Err(JsValue::from_str("mode must be 'dig' or 'dump'")),
+    };
+
+    let input = ConformanceInput {
+        production_start: ps.as_ref(),
+        production_end: pe.as_ref(),
+        schedule_start: ss.as_ref(),
+        schedule_end: se.as_ref(),
+        schedule_future: sf.as_ref(),
+        mode,
+        filter: SliverFilter {
+            min_volume_m3: min_volume,
+            min_thickness_m: min_thickness,
+        },
+        boundaries: &boundaries,
+    };
+
+    let result = classify_conformance(&input);
+
+    let obj = js_sys::Object::new();
+
+    let summary_val = serde_wasm_bindgen::to_value(&result.summary)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    js_sys::Reflect::set(&obj, &"summary".into(), &summary_val)?;
+    js_sys::Reflect::set(&obj, &"mode".into(), &JsValue::from_str(match result.mode {
+        Mode::Dig => "dig",
+        Mode::Dump => "dump",
+    }))?;
+
+    let domains_arr = js_sys::Array::new();
+    for d in &result.domains {
+        let domain_obj = js_sys::Object::new();
+        js_sys::Reflect::set(&domain_obj, &"domain".into(), &JsValue::from_str(&serde_json::to_string(&d.domain).unwrap().trim_matches('"')))?;
+        js_sys::Reflect::set(&domain_obj, &"label".into(), &JsValue::from_str(&d.label))?;
+        js_sys::Reflect::set(&domain_obj, &"color".into(), &JsValue::from_str(&d.color))?;
+        js_sys::Reflect::set(&domain_obj, &"volume".into(), &JsValue::from_f64(d.volume))?;
+        js_sys::Reflect::set(&domain_obj, &"surface_area".into(), &JsValue::from_f64(d.solid.surface_area))?;
+        js_sys::Reflect::set(&domain_obj, &"vertexCount".into(), &JsValue::from_f64(d.solid.vertices.len() as f64))?;
+        js_sys::Reflect::set(&domain_obj, &"triangleCount".into(), &JsValue::from_f64(d.solid.indices.len() as f64))?;
+
+        if let Some(ref bn) = d.block_name {
+            js_sys::Reflect::set(&domain_obj, &"block_name".into(), &JsValue::from_str(bn))?;
+        }
+
+        let flat_pos = flatten_vertices(&d.solid.vertices);
+        let pos_arr = js_sys::Float32Array::new_with_length(flat_pos.len() as u32);
+        pos_arr.copy_from(&flat_pos);
+        js_sys::Reflect::set(&domain_obj, &"positions".into(), &pos_arr)?;
+
+        let flat_idx = flatten_indices(&d.solid.indices);
+        let idx_arr = js_sys::Uint32Array::new_with_length(flat_idx.len() as u32);
+        idx_arr.copy_from(&flat_idx);
+        js_sys::Reflect::set(&domain_obj, &"indices".into(), &idx_arr)?;
+
+        domains_arr.push(&domain_obj);
+    }
+
+    js_sys::Reflect::set(&obj, &"domains".into(), &domains_arr)?;
+
+    Ok(obj.into())
+}
+
+#[wasm_bindgen]
+pub fn parse_surface_flat(data: &[u8]) -> Result<JsValue, JsValue> {
+    let surfaces = decode_surfaces(data).map_err(|e| JsValue::from_str(&e))?;
+    if surfaces.is_empty() {
+        return Err(JsValue::from_str("No surfaces found"));
+    }
+    let s = &surfaces[0];
+
+    let obj = js_sys::Object::new();
+    js_sys::Reflect::set(&obj, &"name".into(), &JsValue::from_str(&s.name))?;
+    js_sys::Reflect::set(&obj, &"vertexCount".into(), &JsValue::from_f64(s.vertices.len() as f64))?;
+    js_sys::Reflect::set(&obj, &"triangleCount".into(), &JsValue::from_f64(s.indices.len() as f64))?;
+
+    let flat_pos = flatten_vertices(&s.vertices);
+    let pos_arr = js_sys::Float32Array::new_with_length(flat_pos.len() as u32);
+    pos_arr.copy_from(&flat_pos);
+    js_sys::Reflect::set(&obj, &"positions".into(), &pos_arr)?;
+
+    let flat_idx = flatten_indices(&s.indices);
+    let idx_arr = js_sys::Uint32Array::new_with_length(flat_idx.len() as u32);
+    idx_arr.copy_from(&flat_idx);
+    js_sys::Reflect::set(&obj, &"indices".into(), &idx_arr)?;
+
+    Ok(obj.into())
 }

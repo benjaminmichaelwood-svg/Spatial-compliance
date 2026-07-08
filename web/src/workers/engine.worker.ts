@@ -3,7 +3,8 @@ import type { BoundaryRegion } from '../types';
 let wasmModule: any = null;
 let initialized = false;
 
-const storedSurfaces = new Map<string, any>();
+const storedSurfaceBinaries = new Map<string, Uint8Array>();
+const storedSurfaceJsons = new Map<string, string>();
 
 interface ParseMsg {
   type: 'parseSurface';
@@ -46,54 +47,6 @@ interface RemoveSurfaceMsg {
 
 type WorkerMessage = InitMsg | ParseMsg | ParseJsonMsg | RunMsg | ClearMsg | RemoveSurfaceMsg;
 
-function surfaceToFlat(surface: any): {
-  name: string;
-  positions: Float64Array;
-  indices: Uint32Array;
-  vertexCount: number;
-  triangleCount: number;
-} {
-  const verts = surface.vertices;
-  const idxs = surface.indices;
-  const positions = new Float64Array(verts.length * 3);
-  for (let i = 0; i < verts.length; i++) {
-    positions[i * 3] = verts[i].x;
-    positions[i * 3 + 1] = verts[i].y;
-    positions[i * 3 + 2] = verts[i].z;
-  }
-  const indices = new Uint32Array(idxs.length * 3);
-  for (let i = 0; i < idxs.length; i++) {
-    indices[i * 3] = idxs[i][0];
-    indices[i * 3 + 1] = idxs[i][1];
-    indices[i * 3 + 2] = idxs[i][2];
-  }
-  return {
-    name: surface.name || '',
-    positions,
-    indices,
-    vertexCount: verts.length,
-    triangleCount: idxs.length,
-  };
-}
-
-function flattenDomainSolids(domains: any[]): any[] {
-  return domains.map((d: any) => {
-    const flat = surfaceToFlat(d.solid);
-    return {
-      domain: d.domain,
-      label: d.label,
-      color: d.color,
-      volume: d.volume,
-      block_name: d.block_name,
-      positions: flat.positions,
-      indices: flat.indices,
-      vertexCount: flat.vertexCount,
-      triangleCount: flat.triangleCount,
-      surface_area: d.solid.surface_area,
-    };
-  });
-}
-
 async function handleInit(msg: InitMsg) {
   try {
     const mod = await import('spatial-engine');
@@ -116,21 +69,15 @@ function handleParseSurface(msg: ParseMsg) {
     self.postMessage({ type: 'progress', id: msg.id, phase: 'parsing', progress: 0.1 });
 
     const data = new Uint8Array(msg.data);
-    const surfaces = wasmModule.parse_surfaces(data) as any[];
 
-    if (!surfaces || surfaces.length === 0) {
-      self.postMessage({ type: 'error', id: msg.id, message: `No surfaces found in ${msg.fileName}` });
-      return;
-    }
+    const result = wasmModule.parse_surface_flat(data);
 
-    const surface = surfaces[0];
-    surface.name = surface.name || msg.fileName.replace(/\.[^.]+$/, '');
-
-    storedSurfaces.set(msg.role, surface);
+    storedSurfaceBinaries.set(msg.role, data);
 
     self.postMessage({ type: 'progress', id: msg.id, phase: 'converting', progress: 0.7 });
 
-    const flat = surfaceToFlat(surface);
+    const positions: Float32Array = result.positions;
+    const indices: Uint32Array = result.indices;
 
     self.postMessage(
       {
@@ -138,13 +85,13 @@ function handleParseSurface(msg: ParseMsg) {
         id: msg.id,
         role: msg.role,
         fileName: msg.fileName,
-        name: flat.name,
-        vertexCount: flat.vertexCount,
-        triangleCount: flat.triangleCount,
-        positions: flat.positions,
-        indices: flat.indices,
+        name: result.name || '',
+        vertexCount: result.vertexCount,
+        triangleCount: result.triangleCount,
+        positions,
+        indices,
       },
-      { transfer: [flat.positions.buffer, flat.indices.buffer] } as any,
+      { transfer: [positions.buffer, indices.buffer] } as any,
     );
   } catch (e: any) {
     self.postMessage({ type: 'error', id: msg.id, message: e.message || String(e) });
@@ -155,9 +102,23 @@ function handleParseSurfaceJson(msg: ParseJsonMsg) {
   try {
     const surface = JSON.parse(msg.json);
     surface.name = surface.name || msg.fileName.replace(/\.[^.]+$/, '');
-    storedSurfaces.set(msg.role, surface);
 
-    const flat = surfaceToFlat(surface);
+    storedSurfaceJsons.set(msg.role, JSON.stringify(surface));
+
+    const verts = surface.vertices;
+    const idxs = surface.indices;
+    const positions = new Float32Array(verts.length * 3);
+    for (let i = 0; i < verts.length; i++) {
+      positions[i * 3] = verts[i].x;
+      positions[i * 3 + 1] = verts[i].y;
+      positions[i * 3 + 2] = verts[i].z;
+    }
+    const indices = new Uint32Array(idxs.length * 3);
+    for (let i = 0; i < idxs.length; i++) {
+      indices[i * 3] = idxs[i][0];
+      indices[i * 3 + 1] = idxs[i][1];
+      indices[i * 3 + 2] = idxs[i][2];
+    }
 
     self.postMessage(
       {
@@ -165,21 +126,33 @@ function handleParseSurfaceJson(msg: ParseJsonMsg) {
         id: msg.id,
         role: msg.role,
         fileName: msg.fileName,
-        name: flat.name,
-        vertexCount: flat.vertexCount,
-        triangleCount: flat.triangleCount,
-        positions: flat.positions,
-        indices: flat.indices,
+        name: surface.name,
+        vertexCount: verts.length,
+        triangleCount: idxs.length,
+        positions,
+        indices,
       },
-      { transfer: [flat.positions.buffer, flat.indices.buffer] } as any,
+      { transfer: [positions.buffer, indices.buffer] } as any,
     );
   } catch (e: any) {
     self.postMessage({ type: 'error', id: msg.id, message: e.message || String(e) });
   }
 }
 
-function surfaceJson(surface: any | undefined): string {
-  return surface ? JSON.stringify(surface) : '';
+function getSurfaceJson(role: string): string {
+  if (storedSurfaceJsons.has(role)) {
+    return storedSurfaceJsons.get(role)!;
+  }
+  if (storedSurfaceBinaries.has(role)) {
+    const data = storedSurfaceBinaries.get(role)!;
+    const surfaces = wasmModule.parse_surfaces(data);
+    if (surfaces && surfaces.length > 0) {
+      const json = JSON.stringify(surfaces[0]);
+      storedSurfaceJsons.set(role, json);
+      return json;
+    }
+  }
+  return '';
 }
 
 function handleRunConformance(msg: RunMsg) {
@@ -189,38 +162,48 @@ function handleRunConformance(msg: RunMsg) {
   }
 
   try {
-    self.postMessage({ type: 'progress', id: msg.id, phase: 'conformance', progress: 0.1 });
+    self.postMessage({ type: 'progress', id: msg.id, phase: 'Preparing surfaces', progress: 0.05 });
 
-    const ps = storedSurfaces.get('production_start');
-    const pe = storedSurfaces.get('production_end');
-    const ss = storedSurfaces.get('schedule_start');
-    const se = storedSurfaces.get('schedule_end');
-    const sf = storedSurfaces.get('schedule_future');
+    const ps = getSurfaceJson('production_start');
+    const pe = getSurfaceJson('production_end');
+    const ss = getSurfaceJson('schedule_start');
+    const se = getSurfaceJson('schedule_end');
+    const sf = getSurfaceJson('schedule_future');
 
-    self.postMessage({ type: 'progress', id: msg.id, phase: 'conformance', progress: 0.3 });
+    self.postMessage({ type: 'progress', id: msg.id, phase: 'Computing conformance', progress: 0.15 });
 
-    let result: any;
-    if (msg.boundaries.length > 0) {
-      result = wasmModule.run_conformance_with_boundaries(
-        surfaceJson(ps), surfaceJson(pe),
-        surfaceJson(ss), surfaceJson(se), surfaceJson(sf),
-        msg.mode, msg.minVolume, msg.minThickness,
-        JSON.stringify(msg.boundaries),
-      );
-    } else {
-      result = wasmModule.run_conformance(
-        surfaceJson(ps), surfaceJson(pe),
-        surfaceJson(ss), surfaceJson(se), surfaceJson(sf),
-        msg.mode, msg.minVolume, msg.minThickness,
-      );
-    }
+    const boundariesJson = msg.boundaries.length > 0 ? JSON.stringify(msg.boundaries) : '';
 
-    self.postMessage({ type: 'progress', id: msg.id, phase: 'transferring', progress: 0.8 });
+    const result = wasmModule.run_conformance_flat(
+      ps, pe, ss, se, sf,
+      msg.mode, msg.minVolume, msg.minThickness,
+      boundariesJson,
+    );
 
-    const flatDomains = flattenDomainSolids(result.domains);
+    self.postMessage({ type: 'progress', id: msg.id, phase: 'Transferring results', progress: 0.85 });
+
+    const flatDomains: any[] = [];
     const transfers: ArrayBuffer[] = [];
-    for (const d of flatDomains) {
-      transfers.push(d.positions.buffer, d.indices.buffer);
+
+    for (let i = 0; i < result.domains.length; i++) {
+      const d = result.domains[i];
+      const positions: Float32Array = d.positions;
+      const indices: Uint32Array = d.indices;
+
+      transfers.push(positions.buffer, indices.buffer);
+
+      flatDomains.push({
+        domain: d.domain,
+        label: d.label,
+        color: d.color,
+        volume: d.volume,
+        block_name: d.block_name,
+        positions,
+        indices,
+        vertexCount: d.vertexCount,
+        triangleCount: d.triangleCount,
+        surface_area: d.surface_area,
+      });
     }
 
     self.postMessage(
@@ -256,10 +239,12 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       handleRunConformance(msg);
       break;
     case 'clearSurfaces':
-      storedSurfaces.clear();
+      storedSurfaceBinaries.clear();
+      storedSurfaceJsons.clear();
       break;
     case 'removeSurface':
-      storedSurfaces.delete(msg.role);
+      storedSurfaceBinaries.delete(msg.role);
+      storedSurfaceJsons.delete(msg.role);
       break;
   }
 };

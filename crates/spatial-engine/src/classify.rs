@@ -1216,4 +1216,54 @@ mod tests {
         assert!(has_domain(&r, Domain::PlannedAndMined), "Expected PAM");
         assert!(has_domain(&r, Domain::MinedNotPlanned), "Expected MNP");
     }
+
+    fn make_large_surface(z_base: f64, name: &str, grid_size: usize) -> TriSurface {
+        let step = 10.0;
+        let n = grid_size + 1;
+        let mut vertices = Vec::with_capacity(n * n);
+        for row in 0..n {
+            for col in 0..n {
+                let x = col as f64 * step;
+                let y = row as f64 * step;
+                let z = z_base + (x * 0.001).sin() * 2.0 + (y * 0.002).cos() * 1.5;
+                vertices.push(Vec3::new(x, y, z));
+            }
+        }
+        let mut indices = Vec::with_capacity(grid_size * grid_size * 2);
+        for row in 0..grid_size {
+            for col in 0..grid_size {
+                let tl = (row * n + col) as u32;
+                let tr = tl + 1;
+                let bl = tl + n as u32;
+                let br = bl + 1;
+                indices.push([tl, bl, tr]);
+                indices.push([tr, bl, br]);
+            }
+        }
+        TriSurface { name: name.to_string(), vertices, indices }
+    }
+
+    #[test]
+    fn large_surface_conformance_completes() {
+        let grid = 1414; // ~2M triangles per surface
+        let ps = make_large_surface(100.0, "ps", grid);
+        let pe = make_large_surface(85.0, "pe", grid);
+        assert!(ps.indices.len() > 1_900_000, "Need ~2M tris, got {}", ps.indices.len());
+
+        let input = ConformanceInput {
+            production_start: Some(&ps),
+            production_end: Some(&pe),
+            schedule_start: None,
+            schedule_end: None,
+            schedule_future: None,
+            mode: Mode::Dig,
+            filter: SliverFilter { min_volume_m3: 1.0, min_thickness_m: 0.1 },
+            boundaries: &[],
+        };
+
+        let result = classify_conformance(&input);
+        assert!(!result.domains.is_empty(), "Should produce at least one domain");
+        let total_vol: f64 = result.domains.iter().map(|d| d.volume).sum();
+        assert!(total_vol > 0.0, "Total volume should be positive");
+    }
 }

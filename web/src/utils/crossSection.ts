@@ -189,7 +189,15 @@ export function computeCrossSection(
   for (const { key, label } of SURFACE_ROLES) {
     const upload = uploads.get(key);
     if (!upload) continue;
-    const points = computeSurfaceProfile(upload.surface.vertices, upload.surface.indices, p1, p2);
+    const verts: Vec3[] = [];
+    for (let i = 0; i < upload.vertexCount; i++) {
+      verts.push({ x: upload.positions[i * 3], y: upload.positions[i * 3 + 1], z: upload.positions[i * 3 + 2] });
+    }
+    const idxs: [number, number, number][] = [];
+    for (let i = 0; i < upload.triangleCount; i++) {
+      idxs.push([upload.indices[i * 3], upload.indices[i * 3 + 1], upload.indices[i * 3 + 2]]);
+    }
+    const points = computeSurfaceProfile(verts, idxs, p1, p2);
     if (points.length > 0) {
       profiles.push({ role: key, label, fileName: upload.fileName, color: PROFILE_COLORS[key], points });
     }

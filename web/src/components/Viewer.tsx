@@ -103,28 +103,14 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
   const matRef = useRef<THREE.MeshPhongMaterial>(null);
 
   const { geometry, triCount } = useMemo(() => {
-    const verts = upload.surface.vertices;
-    const idxs = upload.surface.indices;
-    const positions = new Float32Array(verts.length * 3);
-    for (let i = 0; i < verts.length; i++) {
-      positions[i * 3] = verts[i].x;
-      positions[i * 3 + 1] = verts[i].y;
-      positions[i * 3 + 2] = verts[i].z;
-    }
-    const indices = new Uint32Array(idxs.length * 3);
-    for (let i = 0; i < idxs.length; i++) {
-      indices[i * 3] = idxs[i][0];
-      indices[i * 3 + 1] = idxs[i][1];
-      indices[i * 3 + 2] = idxs[i][2];
-    }
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    geo.setAttribute('position', new THREE.BufferAttribute(upload.positions, 3));
+    geo.setIndex(new THREE.BufferAttribute(upload.indices, 1));
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
     (geo as any).boundsTree = new MeshBVH(geo);
-    return { geometry: geo, triCount: idxs.length };
-  }, [upload.surface]);
+    return { geometry: geo, triCount: upload.triangleCount };
+  }, [upload]);
 
   const edgesGeo = useMemo(() => {
     if (triCount >= EDGES_TRI_THRESHOLD) return null;
@@ -146,15 +132,15 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
   const id = `surface-${upload.role}`;
 
   const surfaceMeta = useMemo(() => {
-    const verts = upload.surface.vertices;
     const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
-    for (const v of verts) {
-      if (v.x < box.minX) box.minX = v.x; if (v.x > box.maxX) box.maxX = v.x;
-      if (v.y < box.minY) box.minY = v.y; if (v.y > box.maxY) box.maxY = v.y;
-      if (v.z < box.minZ) box.minZ = v.z; if (v.z > box.maxZ) box.maxZ = v.z;
+    for (let i = 0; i < upload.vertexCount; i++) {
+      const x = upload.positions[i * 3], y = upload.positions[i * 3 + 1], z = upload.positions[i * 3 + 2];
+      if (x < box.minX) box.minX = x; if (x > box.maxX) box.maxX = x;
+      if (y < box.minY) box.minY = y; if (y > box.maxY) box.maxY = y;
+      if (z < box.minZ) box.minZ = z; if (z > box.maxZ) box.maxZ = z;
     }
-    return { vertexCount: verts.length, triangleCount: upload.surface.indices.length, bbox: box };
-  }, [upload.surface]);
+    return { vertexCount: upload.vertexCount, triangleCount: upload.triangleCount, bbox: box };
+  }, [upload]);
 
   return (
     <group>
@@ -406,8 +392,8 @@ function ViewPresetController({ preset, flatDomains, uploads, onDone }: ViewPres
       }
     }
     for (const [, upload] of uploads) {
-      for (const v of upload.surface.vertices) {
-        box.expandByPoint(new THREE.Vector3(v.x, v.y, v.z));
+      for (let i = 0; i < upload.vertexCount; i++) {
+        box.expandByPoint(new THREE.Vector3(upload.positions[i * 3], upload.positions[i * 3 + 1], upload.positions[i * 3 + 2]));
       }
     }
     if (box.isEmpty()) { onDone(); return; }
@@ -793,8 +779,8 @@ function KeyboardShortcuts({
           }
         }
         for (const [, upload] of uploads) {
-          for (const v of upload.surface.vertices) {
-            box.expandByPoint(new THREE.Vector3(v.x, v.y, v.z));
+          for (let i = 0; i < upload.vertexCount; i++) {
+            box.expandByPoint(new THREE.Vector3(upload.positions[i * 3], upload.positions[i * 3 + 1], upload.positions[i * 3 + 2]));
           }
         }
         if (box.isEmpty()) return;

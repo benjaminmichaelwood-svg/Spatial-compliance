@@ -72,8 +72,12 @@ export interface ConformanceResult {
 
 export interface UploadedSurface {
   role: SurfaceRole;
-  surface: TriSurface;
   fileName: string;
+  name: string;
+  positions: Float32Array;
+  indices: Uint32Array;
+  vertexCount: number;
+  triangleCount: number;
 }
 
 export interface Settings {
