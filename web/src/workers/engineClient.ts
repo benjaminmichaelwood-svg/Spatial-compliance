@@ -27,6 +27,7 @@ export interface FlatConformanceResult {
   mode: string;
   summary: any;
   flatDomains: FlatDomainSolid[];
+  domainMaps?: Record<string, Uint8Array>;
 }
 
 export type ProgressCallback = (phase: string, progress: number) => void;

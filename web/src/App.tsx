@@ -116,6 +116,8 @@ export default function App() {
 
   const [showPerf, setShowPerf] = useState(false);
   const [progress, setProgress] = useState<{ phase: string; value: number } | null>(null);
+  const [domainMaps, setDomainMaps] = useState<Map<SurfaceRole, Uint8Array>>(new Map());
+  const [displayMode, setDisplayMode] = useState<'painting' | 'solids'>('painting');
 
 
   useEffect(() => {
@@ -353,6 +355,16 @@ export default function App() {
         setFlatDomains(flatResult.flatDomains);
         setResult(conformanceResult);
         setVisible(new Set(conformanceResult.domains.map((d) => d.domain)));
+
+        if (flatResult.domainMaps) {
+          const maps = new Map<SurfaceRole, Uint8Array>();
+          for (const [role, arr] of Object.entries(flatResult.domainMaps)) {
+            if (arr && arr.length > 0) {
+              maps.set(role as SurfaceRole, arr);
+            }
+          }
+          setDomainMaps(maps);
+        }
       } else {
         await new Promise((r) => requestAnimationFrame(r));
 
@@ -556,6 +568,7 @@ export default function App() {
               setStep('landing');
               setResult(null);
               setFlatDomains([]);
+              setDomainMaps(new Map());
               setUploads(new Map());
               setBoundaries([]);
               setMainTab('viewer');
@@ -708,6 +721,34 @@ export default function App() {
               </svg>
             </button>
 
+            {domainMaps.size > 0 && (
+              <>
+                <div className="mx-1 h-4 w-px bg-slate-700" />
+                <div className="flex items-center gap-0.5 rounded bg-slate-800 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setDisplayMode('painting')}
+                    className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                      displayMode === 'painting' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
+                    }`}
+                    title="Colour surfaces by domain"
+                  >
+                    Paint
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDisplayMode('solids')}
+                    className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                      displayMode === 'solids' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
+                    }`}
+                    title="Show solid prisms"
+                  >
+                    Solids
+                  </button>
+                </div>
+              </>
+            )}
+
             <span className="ml-2 text-[10px] text-slate-500">
               {result.domains.length} solids
             </span>
@@ -856,6 +897,8 @@ export default function App() {
                       onAddMeasurePoint={handleAddMeasurePoint}
                       savedMeasurements={savedMeasurements}
                       showPerf={showPerf}
+                      domainMaps={domainMaps}
+                      displayMode={displayMode}
                     />
                   </div>
                   {crossSectionData && (

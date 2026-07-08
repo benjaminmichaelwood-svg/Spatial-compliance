@@ -35,6 +35,23 @@ pub enum Domain {
 }
 
 impl Domain {
+    pub fn index(self) -> u8 {
+        match self {
+            Domain::PlannedAndMined => 1,
+            Domain::PlannedNotMined => 2,
+            Domain::MinedNotPlanned => 3,
+            Domain::MinedBeforeStart => 4,
+            Domain::PrescheduleDelay => 5,
+            Domain::AheadOfPlan => 6,
+            Domain::PlannedAndDumped => 7,
+            Domain::PlannedNotDumped => 8,
+            Domain::DumpedNotPlanned => 9,
+            Domain::DumpedBeforeStart => 10,
+            Domain::DumpPrescheduleDelay => 11,
+            Domain::DumpedAheadOfPlan => 12,
+        }
+    }
+
     pub fn color(self) -> &'static str {
         match self {
             Domain::PlannedAndMined => "#4CAF50",
@@ -631,6 +648,90 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Per-triangle domain classification for surface painting
+// ---------------------------------------------------------------------------
+
+pub fn classify_surface_domains(input: &ConformanceInput) -> Vec<(usize, Vec<u8>)> {
+    let opt_surfaces: [Option<&TriSurface>; 5] = [
+        input.production_start,
+        input.production_end,
+        input.schedule_start,
+        input.schedule_end,
+        input.schedule_future,
+    ];
+
+    let bvhs: [Option<SurfaceBvh>; 5] = [
+        opt_surfaces[0].map(SurfaceBvh::build),
+        opt_surfaces[1].map(SurfaceBvh::build),
+        opt_surfaces[2].map(SurfaceBvh::build),
+        opt_surfaces[3].map(SurfaceBvh::build),
+        opt_surfaces[4].map(SurfaceBvh::build),
+    ];
+
+    let mut results = Vec::new();
+
+    for si in 0..5 {
+        let surface = match opt_surfaces[si] {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let num_tris = surface.num_triangles();
+        let mut domain_map = vec![0u8; num_tris];
+
+        for ti in 0..num_tris {
+            let tri = surface.triangle(ti);
+            let cx = (tri.v0.x + tri.v1.x + tri.v2.x) / 3.0;
+            let cy = (tri.v0.y + tri.v1.y + tri.v2.y) / 3.0;
+            let cz = (tri.v0.z + tri.v1.z + tri.v2.z) / 3.0;
+
+            let zs: [Option<f64>; 5] = [
+                if si == 0 { Some(cz) } else { bvhs[0].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
+                if si == 1 { Some(cz) } else { bvhs[1].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
+                if si == 2 { Some(cz) } else { bvhs[2].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
+                if si == 3 { Some(cz) } else { bvhs[3].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
+                if si == 4 { Some(cz) } else { bvhs[4].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
+            ];
+
+            let has_production = zs[0].is_some() && zs[1].is_some();
+            let has_schedule = zs[2].is_some() && zs[3].is_some();
+
+            let intervals = if has_production && has_schedule {
+                let (ps, pe) = (zs[0].unwrap(), zs[1].unwrap());
+                let (ss, se) = (zs[2].unwrap(), zs[3].unwrap());
+                let sf = zs[4];
+                match input.mode {
+                    Mode::Dig => classify_cell_dig(ps, pe, ss, se, sf),
+                    Mode::Dump => classify_cell_dump(ps, pe, ss, se, sf),
+                }
+            } else if has_production {
+                let (ps, pe) = (zs[0].unwrap(), zs[1].unwrap());
+                classify_cell_no_schedule(ps, pe, input.mode)
+            } else if has_schedule {
+                let (ss, se) = (zs[2].unwrap(), zs[3].unwrap());
+                classify_cell_schedule_only(ss, se, input.mode)
+            } else {
+                continue;
+            };
+
+            if let Some(best) = intervals.iter().max_by(|a, b| {
+                let ta = a.upper - a.lower;
+                let tb = b.upper - b.lower;
+                ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
+            }) {
+                if best.upper - best.lower > 1e-9 {
+                    domain_map[ti] = best.domain.index();
+                }
+            }
+        }
+
+        results.push((si, domain_map));
+    }
+
+    results
+}
 
 // ---------------------------------------------------------------------------
 // Tests

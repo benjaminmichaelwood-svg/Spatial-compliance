@@ -1,7 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 use crate::boundary::extract_surface_outline;
-use crate::classify::{classify_conformance, ConformanceInput, Mode};
+use crate::classify::{classify_conformance, classify_surface_domains, ConformanceInput, Mode};
 use crate::cutfill::{compute_cut_fill, SliverFilter};
 use crate::dxf::parse_dxf_polygons;
 use crate::format::{decode_surface, decode_surfaces, encode_surfaces};
@@ -340,6 +340,16 @@ pub fn run_conformance_flat(
     }
 
     js_sys::Reflect::set(&obj, &"domains".into(), &domains_arr)?;
+
+    let paint_maps = classify_surface_domains(&input);
+    let paint_obj = js_sys::Object::new();
+    let roles = ["production_start", "production_end", "schedule_start", "schedule_end", "schedule_future"];
+    for (si, domain_map) in &paint_maps {
+        let arr = js_sys::Uint8Array::new_with_length(domain_map.len() as u32);
+        arr.copy_from(domain_map);
+        js_sys::Reflect::set(&paint_obj, &roles[*si].into(), &arr)?;
+    }
+    js_sys::Reflect::set(&obj, &"domainMaps".into(), &paint_obj)?;
 
     Ok(obj.into())
 }

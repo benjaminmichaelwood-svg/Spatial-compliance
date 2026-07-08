@@ -79,6 +79,28 @@ const DEFAULT_SURFACE_COLORS: Record<SurfaceRole, string> = {
   schedule_future: '#a78bfa',
 };
 
+interface DomainIndexInfo {
+  domain: string;
+  label: string;
+  color: THREE.Color;
+}
+
+const DOMAIN_INDEX_MAP: DomainIndexInfo[] = [
+  { domain: '', label: '', color: new THREE.Color(0x808080) },
+  { domain: 'PlannedAndMined', label: 'Planned and Mined', color: new THREE.Color('#4CAF50') },
+  { domain: 'PlannedNotMined', label: 'Planned Not Mined', color: new THREE.Color('#FFEB3B') },
+  { domain: 'MinedNotPlanned', label: 'Mined Not Planned', color: new THREE.Color('#F44336') },
+  { domain: 'MinedBeforeStart', label: 'Mined Before Start', color: new THREE.Color('#9C27B0') },
+  { domain: 'PrescheduleDelay', label: 'Preschedule Delay', color: new THREE.Color('#FF9800') },
+  { domain: 'AheadOfPlan', label: 'Ahead of Plan', color: new THREE.Color('#2196F3') },
+  { domain: 'PlannedAndDumped', label: 'Planned and Dumped', color: new THREE.Color('#66BB6A') },
+  { domain: 'PlannedNotDumped', label: 'Planned Not Dumped', color: new THREE.Color('#FFF176') },
+  { domain: 'DumpedNotPlanned', label: 'Dumped Not Planned', color: new THREE.Color('#EF5350') },
+  { domain: 'DumpedBeforeStart', label: 'Dumped Before Start', color: new THREE.Color('#AB47BC') },
+  { domain: 'DumpPrescheduleDelay', label: 'Dump Preschedule Delay', color: new THREE.Color('#FFA726') },
+  { domain: 'DumpedAheadOfPlan', label: 'Dumped Ahead of Plan', color: new THREE.Color('#42A5F5') },
+];
+
 const BG_COLORS: Record<ViewerBackground, string> = {
   dark: '#1a1a1a',
   light: '#ffffff',
@@ -95,9 +117,11 @@ interface SurfaceMeshProps {
   isDark: boolean;
   onHover: (info: TooltipInfo | null) => void;
   onSelect: (id: string, info: SelectionInfo) => void;
+  domainMap?: Uint8Array;
+  domainVisible?: Set<string>;
 }
 
-function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, isDark }: SurfaceMeshProps) {
+function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, isDark, domainMap, domainVisible }: SurfaceMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const edgesRef = useRef<THREE.LineSegments>(null);
   const matRef = useRef<THREE.MeshPhongMaterial>(null);
@@ -112,21 +136,68 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
     return { geometry: geo, triCount: upload.triangleCount };
   }, [upload]);
 
+  const paintedGeo = useMemo(() => {
+    if (!domainMap || domainMap.length === 0) return null;
+    const nonIndexed = geometry.toNonIndexed();
+    nonIndexed.computeVertexNormals();
+    nonIndexed.computeBoundingSphere();
+    const count = nonIndexed.attributes.position.count;
+    const colors = new Float32Array(count * 3);
+    nonIndexed.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    (nonIndexed as any).boundsTree = new MeshBVH(nonIndexed);
+    return nonIndexed;
+  }, [geometry, domainMap]);
+
+  useEffect(() => {
+    if (!paintedGeo || !domainMap) return;
+    const colorAttr = paintedGeo.attributes.color as THREE.BufferAttribute;
+    const arr = colorAttr.array as Float32Array;
+    const defaultColor = new THREE.Color(style.color);
+
+    for (let ti = 0; ti < domainMap.length; ti++) {
+      const idx = domainMap[ti];
+      let r: number, g: number, b: number;
+      if (idx > 0 && idx < DOMAIN_INDEX_MAP.length && (!domainVisible || domainVisible.has(DOMAIN_INDEX_MAP[idx].domain))) {
+        const c = DOMAIN_INDEX_MAP[idx].color;
+        r = c.r; g = c.g; b = c.b;
+      } else {
+        r = defaultColor.r; g = defaultColor.g; b = defaultColor.b;
+      }
+      const vi = ti * 3;
+      for (let v = 0; v < 3; v++) {
+        arr[(vi + v) * 3] = r;
+        arr[(vi + v) * 3 + 1] = g;
+        arr[(vi + v) * 3 + 2] = b;
+      }
+    }
+    colorAttr.needsUpdate = true;
+  }, [paintedGeo, domainMap, domainVisible, style.color]);
+
+  const isPainted = !!paintedGeo;
+  const activeGeo = paintedGeo ?? geometry;
+
   const edgesGeo = useMemo(() => {
     if (triCount >= EDGES_TRI_THRESHOLD) return null;
+    if (isPainted) return null;
     return new THREE.EdgesGeometry(geometry, 30);
-  }, [geometry, triCount]);
+  }, [geometry, triCount, isPainted]);
 
   useEffect(() => {
     if (!matRef.current) return;
-    const c = new THREE.Color(style.color);
-    if (selected) c.lerp(new THREE.Color('#ffffff'), 0.15);
-    else if (highlighted) c.lerp(new THREE.Color('#ffffff'), 0.25);
-    matRef.current.color.copy(c);
-    matRef.current.opacity = style.opacity;
-    matRef.current.transparent = style.opacity < 1;
+    if (isPainted) {
+      matRef.current.color.set('#ffffff');
+      matRef.current.opacity = 0.92;
+      matRef.current.transparent = true;
+    } else {
+      const c = new THREE.Color(style.color);
+      if (selected) c.lerp(new THREE.Color('#ffffff'), 0.15);
+      else if (highlighted) c.lerp(new THREE.Color('#ffffff'), 0.25);
+      matRef.current.color.copy(c);
+      matRef.current.opacity = style.opacity;
+      matRef.current.transparent = style.opacity < 1;
+    }
     matRef.current.needsUpdate = true;
-  }, [style.color, style.opacity, selected, highlighted]);
+  }, [style.color, style.opacity, selected, highlighted, isPainted]);
 
   const roleLabel = SURFACE_ROLES.find((r) => r.key === upload.role)?.label ?? upload.role;
   const id = `surface-${upload.role}`;
@@ -146,7 +217,7 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
     <group>
       <mesh
         ref={meshRef}
-        geometry={geometry}
+        geometry={activeGeo}
         frustumCulled
         onPointerOver={(e) => {
           e.stopPropagation();
@@ -174,12 +245,13 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
       >
         <meshPhongMaterial
           ref={matRef}
-          color={style.color}
-          opacity={style.opacity}
-          transparent={style.opacity < 1}
+          color={isPainted ? '#ffffff' : style.color}
+          vertexColors={isPainted}
+          opacity={isPainted ? 0.92 : style.opacity}
+          transparent={isPainted || style.opacity < 1}
           side={THREE.DoubleSide}
           flatShading={false}
-          shininess={10}
+          shininess={isPainted ? 15 : 10}
         />
       </mesh>
       {edgesGeo && (
@@ -927,6 +999,8 @@ export interface ViewerProps {
   onAddMeasurePoint: (point: MeasurePoint) => void;
   savedMeasurements: SavedMeasurement[];
   showPerf: boolean;
+  domainMaps: Map<SurfaceRole, Uint8Array>;
+  displayMode: 'painting' | 'solids';
 }
 
 const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
@@ -934,6 +1008,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   uploads, surfaceVisible, isDrawingSection, sectionLine, onSectionLineChange,
   onSectionDrawComplete, background, domainStyles, surfaceStyles, selectedId,
   onSelect, measureTool, measurePoints, onAddMeasurePoint, savedMeasurements, showPerf,
+  domainMaps, displayMode,
 }, ref) {
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null);
   const [isDraggingEndpoint, setIsDraggingEndpoint] = useState(false);
@@ -1053,14 +1128,15 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
       >
         <color attach="background" args={[BG_COLORS[background]]} />
 
-        <ambientLight intensity={isDark ? 0.25 : 0.4} />
-        <directionalLight position={[1, -0.5, 0.8]} intensity={isDark ? 0.8 : 0.9} />
-        <directionalLight position={[-0.6, 0.4, 0.3]} intensity={isDark ? 0.2 : 0.3} />
+        <ambientLight intensity={isDark ? 0.3 : 0.45} />
+        <directionalLight position={[1, -0.8, 0.4]} intensity={isDark ? 1.0 : 1.1} />
+        <directionalLight position={[-0.5, 0.6, 0.2]} intensity={isDark ? 0.3 : 0.4} />
+        <directionalLight position={[0.2, 0.3, 1.0]} intensity={isDark ? 0.15 : 0.2} />
         <hemisphereLight
-          args={[isDark ? '#334155' : '#d4e5f7', isDark ? '#0f172a' : '#f5f0e6', isDark ? 0.15 : 0.2]}
+          args={[isDark ? '#334155' : '#d4e5f7', isDark ? '#0f172a' : '#f5f0e6', isDark ? 0.2 : 0.25]}
         />
 
-        {[...domainGroups.entries()].map(([domain, solids]) => {
+        {displayMode === 'solids' && [...domainGroups.entries()].map(([domain, solids]) => {
           const id = `domain-${domain}`;
           const defaultStyle: ObjectStyle = { color: solids[0].color, opacity: 0.85, wireframe: false };
           const style = domainStyles.get(domain) ?? defaultStyle;
@@ -1081,14 +1157,17 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
         })}
 
         {[...uploads.entries()].map(([role, upload]) => {
-          if (!surfaceVisible.has(role)) return null;
+          const isPaintMode = displayMode === 'painting' && domainMaps.size > 0;
+          if (!isPaintMode && !surfaceVisible.has(role)) return null;
+          if (isPaintMode && !surfaceVisible.has(role) && !domainMaps.has(role)) return null;
           const id = `surface-${role}`;
           const defaultStyle: ObjectStyle = {
             color: DEFAULT_SURFACE_COLORS[role],
-            opacity: 0.3,
+            opacity: isPaintMode ? 0.92 : 0.3,
             wireframe: false,
           };
           const style = surfaceStyles.get(role) ?? defaultStyle;
+          const map = isPaintMode ? domainMaps.get(role) : undefined;
           return (
             <SurfaceMesh
               key={role}
@@ -1099,6 +1178,8 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
               isDark={isDark}
               onHover={handleHover}
               onSelect={handleMeshClick}
+              domainMap={map}
+              domainVisible={visible}
             />
           );
         })}

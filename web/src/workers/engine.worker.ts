@@ -206,6 +206,17 @@ function handleRunConformance(msg: RunMsg) {
       });
     }
 
+    const domainMaps: Record<string, Uint8Array> = {};
+    const mapRoles = ['production_start', 'production_end', 'schedule_start', 'schedule_end', 'schedule_future'];
+    for (const role of mapRoles) {
+      const map: Uint8Array | undefined = result.domainMaps?.[role];
+      if (map && map.length > 0) {
+        const copy = new Uint8Array(map);
+        domainMaps[role] = copy;
+        transfers.push(copy.buffer);
+      }
+    }
+
     self.postMessage(
       {
         type: 'conformanceResult',
@@ -214,6 +225,7 @@ function handleRunConformance(msg: RunMsg) {
           mode: result.mode,
           summary: result.summary,
           flatDomains,
+          domainMaps,
         },
       },
       { transfer: transfers } as any,
