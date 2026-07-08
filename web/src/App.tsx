@@ -11,7 +11,6 @@ import type {
   BoundaryRegion,
   ObjectStyle,
   MeasureTool,
-  ViewPreset,
   ViewerBackground,
 } from './types';
 import { DEFAULT_SETTINGS, SURFACE_ROLES } from './types';
@@ -121,13 +120,6 @@ function triSurfaceToFlat(surface: TriSurface, role: SurfaceRole, fileName: stri
 
 type MainTab = 'viewer' | 'reports';
 
-const VIEW_PRESETS: { key: ViewPreset; label: string; icon: string }[] = [
-  { key: 'plan', label: 'Plan', icon: 'P' },
-  { key: 'north', label: 'North', icon: 'N' },
-  { key: 'east', label: 'East', icon: 'E' },
-  { key: 'isometric', label: 'Iso', icon: 'I' },
-  { key: 'fit', label: 'Fit', icon: 'F' },
-];
 
 function formatVolume(v: number): string {
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
@@ -158,7 +150,7 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<ViewerHandle>(null);
 
-  const [background, setBackground] = useState<ViewerBackground>('dark');
+  const [background, setBackground] = useState<ViewerBackground>('light');
   const [domainStyles, setDomainStyles] = useState<Map<string, ObjectStyle>>(new Map());
   const [surfaceStyles, setSurfaceStyles] = useState<Map<SurfaceRole, ObjectStyle>>(new Map());
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -537,9 +529,6 @@ export default function App() {
     link.click();
   }, [comparisonName]);
 
-  const handlePreset = useCallback((preset: ViewPreset) => {
-    viewerRef.current?.applyPreset(preset);
-  }, []);
 
   if (step === 'landing') {
     return <LandingPage onStart={handleStart} />;
@@ -621,23 +610,6 @@ export default function App() {
         {/* Toolbar */}
         {result && mainTab === 'viewer' && (
           <div className="flex items-center gap-1">
-            {/* View presets */}
-            <div className="flex items-center gap-0.5 rounded bg-slate-800 p-0.5">
-              {VIEW_PRESETS.map(({ key, label, icon }) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => handlePreset(key)}
-                  className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"
-                  title={label}
-                >
-                  {icon}
-                </button>
-              ))}
-            </div>
-
-            <div className="mx-1 h-4 w-px bg-slate-700" />
-
             {/* Background toggle */}
             <button
               type="button"

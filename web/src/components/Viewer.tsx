@@ -16,6 +16,108 @@ import type { FlatDomainSolid } from '../workers/engineClient';
 import { decimateGeometry } from '../utils/decimation';
 import PerformanceOverlay from './PerformanceOverlay';
 
+const WIREFRAME_VERT = `
+  in vec3 barycentric;
+  out vec3 vBarycentric;
+  out vec3 vNormal;
+  out vec3 vWorldPos;
+  void main() {
+    vBarycentric = barycentric;
+    vNormal = normalize(normalMatrix * normal);
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorldPos = wp.xyz;
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+
+const WIREFRAME_FRAG = `
+  precision highp float;
+  uniform vec3 uColor;
+  uniform float uOpacity;
+  uniform vec3 uEdgeColor;
+  uniform float uEdgeWidth;
+  uniform bool uSelected;
+  in vec3 vBarycentric;
+  in vec3 vNormal;
+  in vec3 vWorldPos;
+  out vec4 fragColor;
+
+  float edgeFactor() {
+    vec3 d = fwidth(vBarycentric);
+    vec3 a3 = smoothstep(vec3(0.0), d * uEdgeWidth, vBarycentric);
+    return min(min(a3.x, a3.y), a3.z);
+  }
+
+  void main() {
+    vec3 lightDir = normalize(vec3(0.4, -0.3, 0.8));
+    vec3 lightDir2 = normalize(vec3(-0.3, 0.5, 0.4));
+    vec3 n = normalize(vNormal);
+    float diff = max(dot(n, lightDir), 0.0) * 0.6 + max(dot(n, lightDir2), 0.0) * 0.25;
+    float ambient = 0.35;
+    vec3 lit = uColor * (ambient + diff);
+    if (uSelected) lit += vec3(0.08, 0.06, 0.0);
+    float ef = edgeFactor();
+    vec3 col = mix(uEdgeColor, lit, ef);
+    float alpha = mix(uOpacity + 0.1, uOpacity, ef);
+    fragColor = vec4(col, alpha);
+  }
+`;
+
+function addBarycentricAttribute(geo: THREE.BufferGeometry): THREE.BufferGeometry {
+  const index = geo.index;
+  if (!index) return geo;
+  const posAttr = geo.getAttribute('position');
+  const triCount = index.count / 3;
+  const newPos = new Float32Array(triCount * 9);
+  const newNorm = new Float32Array(triCount * 9);
+  const bary = new Float32Array(triCount * 9);
+  const oldPos = posAttr.array as Float32Array;
+  const normAttr = geo.getAttribute('normal');
+  const oldNorm = normAttr ? (normAttr.array as Float32Array) : null;
+  const idx = index.array;
+
+  for (let t = 0; t < triCount; t++) {
+    for (let v = 0; v < 3; v++) {
+      const srcIdx = idx[t * 3 + v];
+      const dstIdx = t * 3 + v;
+      newPos[dstIdx * 3]     = oldPos[srcIdx * 3];
+      newPos[dstIdx * 3 + 1] = oldPos[srcIdx * 3 + 1];
+      newPos[dstIdx * 3 + 2] = oldPos[srcIdx * 3 + 2];
+      if (oldNorm) {
+        newNorm[dstIdx * 3]     = oldNorm[srcIdx * 3];
+        newNorm[dstIdx * 3 + 1] = oldNorm[srcIdx * 3 + 1];
+        newNorm[dstIdx * 3 + 2] = oldNorm[srcIdx * 3 + 2];
+      }
+      bary[dstIdx * 3 + v] = 1.0;
+    }
+  }
+
+  const newGeo = new THREE.BufferGeometry();
+  newGeo.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
+  newGeo.setAttribute('normal', new THREE.BufferAttribute(newNorm, 3));
+  newGeo.setAttribute('barycentric', new THREE.BufferAttribute(bary, 3));
+  if (!oldNorm) newGeo.computeVertexNormals();
+  newGeo.computeBoundingSphere();
+  return newGeo;
+}
+
+function createWireframeMaterial(color: string, opacity: number, isDark: boolean, selected: boolean): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    vertexShader: WIREFRAME_VERT,
+    fragmentShader: WIREFRAME_FRAG,
+    uniforms: {
+      uColor: { value: new THREE.Color(color) },
+      uOpacity: { value: opacity },
+      uEdgeColor: { value: new THREE.Color(isDark ? '#555555' : '#888888') },
+      uEdgeWidth: { value: 1.2 },
+      uSelected: { value: selected },
+    },
+    transparent: true,
+    side: THREE.DoubleSide,
+    glslVersion: THREE.GLSL3,
+  });
+}
+
 interface DomainGroupProps {
   domain: string;
   solids: FlatDomainSolid[];
@@ -23,6 +125,7 @@ interface DomainGroupProps {
   style: ObjectStyle;
   selected: boolean;
   highlighted: boolean;
+  isDark: boolean;
   lodLevel: number;
   onHover: (info: TooltipInfo | null) => void;
   onSelect: (id: string, info: SelectionInfo) => void;
@@ -64,24 +167,23 @@ const DEFAULT_SURFACE_COLORS: Record<SurfaceRole, string> = {
 };
 
 const BG_COLORS: Record<ViewerBackground, string> = {
-  dark: '#1a1a2e',
-  light: '#f1f5f9',
+  dark: '#1a1a1a',
+  light: '#ffffff',
 };
-
-const WIREFRAME_TRI_LIMIT = 10_000;
 
 interface SurfaceMeshProps {
   upload: UploadedSurface;
   style: ObjectStyle;
   selected: boolean;
   highlighted: boolean;
+  isDark: boolean;
   onHover: (info: TooltipInfo | null) => void;
   onSelect: (id: string, info: SelectionInfo) => void;
 }
 
-function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect }: SurfaceMeshProps) {
+function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, isDark }: SurfaceMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
-  const matRef = useRef<THREE.MeshPhysicalMaterial>(null);
+
   const geometry = useMemo(() => {
     const verts = upload.surface.vertices;
     const idxs = upload.surface.indices;
@@ -101,36 +203,31 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect }
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeVertexNormals();
-    geo.computeBoundingSphere();
-    return geo;
+    return addBarycentricAttribute(geo);
   }, [upload.surface]);
 
-  const triCount = upload.surface.indices.length;
-  const canWireframe = triCount <= WIREFRAME_TRI_LIMIT;
-  const showWireframe = style.wireframe && canWireframe;
-
-  const roleLabel = SURFACE_ROLES.find((r) => r.key === upload.role)?.label ?? upload.role;
+  const material = useMemo(
+    () => createWireframeMaterial(style.color, style.opacity, isDark, selected),
+    [],
+  );
 
   useEffect(() => {
-    const mat = matRef.current;
-    if (!mat) return;
     const c = new THREE.Color(style.color);
     if (highlighted) c.lerp(new THREE.Color('#ffffff'), 0.3);
-    mat.color.copy(c);
-    mat.opacity = style.opacity;
-    mat.wireframe = showWireframe;
-    mat.clearcoat = selected ? 0.3 : 0;
-    mat.emissive.set(selected ? '#fbbf24' : '#000000');
-    mat.emissiveIntensity = selected ? 0.15 : 0;
-    mat.needsUpdate = false;
-  }, [style.color, style.opacity, showWireframe, selected, highlighted]);
+    material.uniforms.uColor.value.copy(c);
+    material.uniforms.uOpacity.value = style.opacity;
+    material.uniforms.uSelected.value = selected;
+    material.uniforms.uEdgeColor.value.set(isDark ? '#555555' : '#888888');
+  }, [style.color, style.opacity, selected, highlighted, isDark, material]);
 
+  const roleLabel = SURFACE_ROLES.find((r) => r.key === upload.role)?.label ?? upload.role;
   const id = `surface-${upload.role}`;
 
   return (
     <mesh
       ref={meshRef}
       geometry={geometry}
+      material={material}
       frustumCulled
       onPointerOver={(e) => {
         e.stopPropagation();
@@ -154,16 +251,7 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect }
           surfaceFileName: upload.fileName, surfaceRole: upload.role,
         });
       }}
-    >
-      <meshPhysicalMaterial
-        ref={matRef}
-        side={THREE.DoubleSide}
-        transparent
-        roughness={0.5}
-        metalness={0.05}
-        envMapIntensity={0.4}
-      />
-    </mesh>
+    />
   );
 }
 
@@ -212,10 +300,9 @@ function buildBatchedGeometry(
 }
 
 function BatchedDomainGroup({
-  domain, solids, visible, style, selected, highlighted, lodLevel, onHover, onSelect,
+  domain, solids, visible, style, selected, highlighted, isDark, lodLevel, onHover, onSelect,
 }: DomainGroupProps) {
   const meshRef = useRef<THREE.Mesh>(null);
-  const matRef = useRef<THREE.MeshPhysicalMaterial>(null);
 
   const { fullGeo, triRanges, lodGeos } = useMemo(() => {
     const { geometry: full, triRanges: ranges } = buildBatchedGeometry(solids);
@@ -223,6 +310,8 @@ function BatchedDomainGroup({
     const idxAttr = full.index!;
     const positions = posAttr.array as Float32Array;
     const indices = idxAttr.array as Uint32Array;
+
+    const baryFull = addBarycentricAttribute(full);
 
     const totalTris = indices.length / 3;
     const lods: THREE.BufferGeometry[] = [];
@@ -233,19 +322,17 @@ function BatchedDomainGroup({
       medGeo.setAttribute('position', new THREE.BufferAttribute(med.positions, 3));
       medGeo.setIndex(new THREE.BufferAttribute(med.indices, 1));
       medGeo.computeVertexNormals();
-      medGeo.computeBoundingSphere();
-      lods.push(medGeo);
+      lods.push(addBarycentricAttribute(medGeo));
 
       const low = decimateGeometry(positions, indices, 0.05);
       const lowGeo = new THREE.BufferGeometry();
       lowGeo.setAttribute('position', new THREE.BufferAttribute(low.positions, 3));
       lowGeo.setIndex(new THREE.BufferAttribute(low.indices, 1));
       lowGeo.computeVertexNormals();
-      lowGeo.computeBoundingSphere();
-      lods.push(lowGeo);
+      lods.push(addBarycentricAttribute(lowGeo));
     }
 
-    return { fullGeo: full, triRanges: ranges, lodGeos: lods };
+    return { fullGeo: baryFull, triRanges: ranges, lodGeos: lods };
   }, [solids]);
 
   const activeGeo = lodLevel === 0 ? fullGeo :
@@ -253,27 +340,19 @@ function BatchedDomainGroup({
     lodLevel === 2 && lodGeos.length > 1 ? lodGeos[1] :
     fullGeo;
 
-  const totalTris = useMemo(() => {
-    let count = 0;
-    for (const s of solids) count += s.triangleCount;
-    return count;
-  }, [solids]);
-  const canWireframe = totalTris <= WIREFRAME_TRI_LIMIT;
-  const showWireframe = style.wireframe && canWireframe;
+  const material = useMemo(
+    () => createWireframeMaterial(style.color, style.opacity, isDark, selected),
+    [],
+  );
 
   useEffect(() => {
-    const mat = matRef.current;
-    if (!mat) return;
     const c = new THREE.Color(style.color);
     if (highlighted) c.lerp(new THREE.Color('#ffffff'), 0.25);
-    mat.color.copy(c);
-    mat.opacity = style.opacity;
-    mat.wireframe = showWireframe;
-    mat.clearcoat = selected ? 0.3 : 0;
-    mat.emissive.set(selected ? '#fbbf24' : '#000000');
-    mat.emissiveIntensity = selected ? 0.15 : 0;
-    mat.needsUpdate = false;
-  }, [style.color, style.opacity, showWireframe, selected, highlighted]);
+    material.uniforms.uColor.value.copy(c);
+    material.uniforms.uOpacity.value = style.opacity;
+    material.uniforms.uSelected.value = selected;
+    material.uniforms.uEdgeColor.value.set(isDark ? '#555555' : '#888888');
+  }, [style.color, style.opacity, selected, highlighted, isDark, material]);
 
   const findSolid = useCallback((faceIndex: number) => {
     for (const range of triRanges) {
@@ -292,6 +371,7 @@ function BatchedDomainGroup({
     <mesh
       ref={meshRef}
       geometry={activeGeo}
+      material={material}
       frustumCulled
       onPointerOver={(e) => {
         e.stopPropagation();
@@ -320,16 +400,7 @@ function BatchedDomainGroup({
           blockName: solid?.block_name,
         });
       }}
-    >
-      <meshPhysicalMaterial
-        ref={matRef}
-        side={THREE.DoubleSide}
-        transparent
-        roughness={0.5}
-        metalness={0.05}
-        envMapIntensity={0.4}
-      />
-    </mesh>
+    />
   );
 }
 
@@ -959,11 +1030,32 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   const isDark = background === 'dark';
 
   return (
-    <div className={`relative h-full w-full ${isDark ? 'bg-[#1a1a2e]' : 'bg-slate-50'}`}>
+    <div className={`relative h-full w-full ${isDark ? 'bg-[#1a1a1a]' : 'bg-white'}`}>
       <PerformanceOverlay visible={showPerf} isDark={isDark} />
 
+      {/* View preset buttons */}
+      <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 flex items-center gap-0.5 rounded-lg bg-black/40 backdrop-blur-sm px-1 py-0.5">
+        {([
+          { key: 'plan' as ViewPreset, label: 'Plan' },
+          { key: 'north' as ViewPreset, label: 'North' },
+          { key: 'east' as ViewPreset, label: 'East' },
+          { key: 'isometric' as ViewPreset, label: 'Iso' },
+          { key: 'fit' as ViewPreset, label: 'Fit All' },
+        ]).map(({ key, label }) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setViewPreset(key)}
+            className="rounded px-2.5 py-1 text-[10px] font-medium text-white/70 transition-colors hover:bg-white/20 hover:text-white"
+            title={label}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       <Canvas
-        gl={{ preserveDrawingBuffer: true, antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.0 }}
+        gl={{ preserveDrawingBuffer: true, antialias: true, toneMapping: THREE.NoToneMapping }}
         camera={{ fov: 50, near: 0.1, far: 100000, up: [0, 0, 1] } as CanvasProps['camera']}
         onCreated={(state) => {
           state.camera.up.set(0, 0, 1);
@@ -974,12 +1066,11 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
       >
         <color attach="background" args={[BG_COLORS[background]]} />
 
-        <ambientLight intensity={0.35} />
-        <directionalLight position={[50, -50, 100]} intensity={0.7} castShadow />
-        <directionalLight position={[-30, 40, 60]} intensity={0.35} />
-        <directionalLight position={[0, 0, -80]} intensity={0.15} />
+        <ambientLight intensity={isDark ? 0.25 : 0.4} />
+        <directionalLight position={[1, -0.5, 0.8]} intensity={isDark ? 0.8 : 0.9} />
+        <directionalLight position={[-0.6, 0.4, 0.3]} intensity={isDark ? 0.2 : 0.3} />
         <hemisphereLight
-          args={[isDark ? '#334155' : '#e0f2fe', isDark ? '#0f172a' : '#fef3c7', 0.3]}
+          args={[isDark ? '#334155' : '#d4e5f7', isDark ? '#0f172a' : '#f5f0e6', isDark ? 0.15 : 0.2]}
         />
 
         <LODController onLodChange={setLodLevel} />
@@ -997,6 +1088,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
               style={style}
               selected={selectedId?.startsWith(id) ?? false}
               highlighted={hoveredId?.startsWith(id) ?? false}
+              isDark={isDark}
               lodLevel={lodLevel}
               onHover={handleHover}
               onSelect={handleMeshClick}
@@ -1020,6 +1112,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
               style={style}
               selected={selectedId === id}
               highlighted={hoveredId === id}
+              isDark={isDark}
               onHover={handleHover}
               onSelect={handleMeshClick}
             />
