@@ -2,6 +2,7 @@ import { useRef, useMemo, useEffect, useCallback, useState, forwardRef, useImper
 import { Canvas, useThree, useFrame, type CanvasProps } from '@react-three/fiber';
 import { OrbitControls, Line } from '@react-three/drei';
 import * as THREE from 'three';
+import { MeshBVH, acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from 'three-mesh-bvh';
 import type {
   BoundaryRegion,
   SurfaceRole,
@@ -13,110 +14,13 @@ import type {
 } from '../types';
 import { SURFACE_ROLES } from '../types';
 import type { FlatDomainSolid } from '../workers/engineClient';
-import { decimateGeometry } from '../utils/decimation';
 import PerformanceOverlay from './PerformanceOverlay';
 
-const WIREFRAME_VERT = `
-  in vec3 barycentric;
-  out vec3 vBarycentric;
-  out vec3 vNormal;
-  out vec3 vWorldPos;
-  void main() {
-    vBarycentric = barycentric;
-    vNormal = normalize(normalMatrix * normal);
-    vec4 wp = modelMatrix * vec4(position, 1.0);
-    vWorldPos = wp.xyz;
-    gl_Position = projectionMatrix * viewMatrix * wp;
-  }
-`;
+(THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
+(THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
-const WIREFRAME_FRAG = `
-  precision highp float;
-  uniform vec3 uColor;
-  uniform float uOpacity;
-  uniform vec3 uEdgeColor;
-  uniform float uEdgeWidth;
-  uniform bool uSelected;
-  in vec3 vBarycentric;
-  in vec3 vNormal;
-  in vec3 vWorldPos;
-  out vec4 fragColor;
-
-  float edgeFactor() {
-    vec3 d = fwidth(vBarycentric);
-    vec3 a3 = smoothstep(vec3(0.0), d * uEdgeWidth, vBarycentric);
-    return min(min(a3.x, a3.y), a3.z);
-  }
-
-  void main() {
-    vec3 lightDir = normalize(vec3(0.4, -0.3, 0.8));
-    vec3 lightDir2 = normalize(vec3(-0.3, 0.5, 0.4));
-    vec3 n = normalize(vNormal);
-    float diff = max(dot(n, lightDir), 0.0) * 0.6 + max(dot(n, lightDir2), 0.0) * 0.25;
-    float ambient = 0.35;
-    vec3 lit = uColor * (ambient + diff);
-    if (uSelected) lit += vec3(0.08, 0.06, 0.0);
-    float ef = edgeFactor();
-    vec3 col = mix(uEdgeColor, lit, ef);
-    float alpha = mix(uOpacity + 0.1, uOpacity, ef);
-    fragColor = vec4(col, alpha);
-  }
-`;
-
-function addBarycentricAttribute(geo: THREE.BufferGeometry): THREE.BufferGeometry {
-  const index = geo.index;
-  if (!index) return geo;
-  const posAttr = geo.getAttribute('position');
-  const triCount = index.count / 3;
-  const newPos = new Float32Array(triCount * 9);
-  const newNorm = new Float32Array(triCount * 9);
-  const bary = new Float32Array(triCount * 9);
-  const oldPos = posAttr.array as Float32Array;
-  const normAttr = geo.getAttribute('normal');
-  const oldNorm = normAttr ? (normAttr.array as Float32Array) : null;
-  const idx = index.array;
-
-  for (let t = 0; t < triCount; t++) {
-    for (let v = 0; v < 3; v++) {
-      const srcIdx = idx[t * 3 + v];
-      const dstIdx = t * 3 + v;
-      newPos[dstIdx * 3]     = oldPos[srcIdx * 3];
-      newPos[dstIdx * 3 + 1] = oldPos[srcIdx * 3 + 1];
-      newPos[dstIdx * 3 + 2] = oldPos[srcIdx * 3 + 2];
-      if (oldNorm) {
-        newNorm[dstIdx * 3]     = oldNorm[srcIdx * 3];
-        newNorm[dstIdx * 3 + 1] = oldNorm[srcIdx * 3 + 1];
-        newNorm[dstIdx * 3 + 2] = oldNorm[srcIdx * 3 + 2];
-      }
-      bary[dstIdx * 3 + v] = 1.0;
-    }
-  }
-
-  const newGeo = new THREE.BufferGeometry();
-  newGeo.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
-  newGeo.setAttribute('normal', new THREE.BufferAttribute(newNorm, 3));
-  newGeo.setAttribute('barycentric', new THREE.BufferAttribute(bary, 3));
-  if (!oldNorm) newGeo.computeVertexNormals();
-  newGeo.computeBoundingSphere();
-  return newGeo;
-}
-
-function createWireframeMaterial(color: string, opacity: number, isDark: boolean, selected: boolean): THREE.ShaderMaterial {
-  return new THREE.ShaderMaterial({
-    vertexShader: WIREFRAME_VERT,
-    fragmentShader: WIREFRAME_FRAG,
-    uniforms: {
-      uColor: { value: new THREE.Color(color) },
-      uOpacity: { value: opacity },
-      uEdgeColor: { value: new THREE.Color(isDark ? '#555555' : '#888888') },
-      uEdgeWidth: { value: 1.2 },
-      uSelected: { value: selected },
-    },
-    transparent: true,
-    side: THREE.DoubleSide,
-    glslVersion: THREE.GLSL3,
-  });
-}
+const EDGES_TRI_THRESHOLD = 100_000;
 
 interface DomainGroupProps {
   domain: string;
@@ -126,7 +30,6 @@ interface DomainGroupProps {
   selected: boolean;
   highlighted: boolean;
   isDark: boolean;
-  lodLevel: number;
   onHover: (info: TooltipInfo | null) => void;
   onSelect: (id: string, info: SelectionInfo) => void;
 }
@@ -181,6 +84,9 @@ const BG_COLORS: Record<ViewerBackground, string> = {
   light: '#ffffff',
 };
 
+const EDGE_COLOR_DARK = 0x444444;
+const EDGE_COLOR_LIGHT = 0x999999;
+
 interface SurfaceMeshProps {
   upload: UploadedSurface;
   style: ObjectStyle;
@@ -193,8 +99,10 @@ interface SurfaceMeshProps {
 
 function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, isDark }: SurfaceMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
+  const edgesRef = useRef<THREE.LineSegments>(null);
+  const matRef = useRef<THREE.MeshPhongMaterial>(null);
 
-  const geometry = useMemo(() => {
+  const { geometry, triCount } = useMemo(() => {
     const verts = upload.surface.vertices;
     const idxs = upload.surface.indices;
     const positions = new Float32Array(verts.length * 3);
@@ -213,22 +121,26 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeVertexNormals();
-    return addBarycentricAttribute(geo);
+    geo.computeBoundingSphere();
+    (geo as any).boundsTree = new MeshBVH(geo);
+    return { geometry: geo, triCount: idxs.length };
   }, [upload.surface]);
 
-  const material = useMemo(
-    () => createWireframeMaterial(style.color, style.opacity, isDark, selected),
-    [],
-  );
+  const edgesGeo = useMemo(() => {
+    if (triCount >= EDGES_TRI_THRESHOLD) return null;
+    return new THREE.EdgesGeometry(geometry, 30);
+  }, [geometry, triCount]);
 
   useEffect(() => {
+    if (!matRef.current) return;
     const c = new THREE.Color(style.color);
-    if (highlighted) c.lerp(new THREE.Color('#ffffff'), 0.3);
-    material.uniforms.uColor.value.copy(c);
-    material.uniforms.uOpacity.value = style.opacity;
-    material.uniforms.uSelected.value = selected;
-    material.uniforms.uEdgeColor.value.set(isDark ? '#555555' : '#888888');
-  }, [style.color, style.opacity, selected, highlighted, isDark, material]);
+    if (selected) c.lerp(new THREE.Color('#ffffff'), 0.15);
+    else if (highlighted) c.lerp(new THREE.Color('#ffffff'), 0.25);
+    matRef.current.color.copy(c);
+    matRef.current.opacity = style.opacity;
+    matRef.current.transparent = style.opacity < 1;
+    matRef.current.needsUpdate = true;
+  }, [style.color, style.opacity, selected, highlighted]);
 
   const roleLabel = SURFACE_ROLES.find((r) => r.key === upload.role)?.label ?? upload.role;
   const id = `surface-${upload.role}`;
@@ -245,41 +157,57 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
   }, [upload.surface]);
 
   return (
-    <mesh
-      ref={meshRef}
-      geometry={geometry}
-      material={material}
-      frustumCulled
-      onPointerOver={(e) => {
-        e.stopPropagation();
-        onHover({
-          x: e.clientX, y: e.clientY, domain: roleLabel, volume: 0,
-          surfaceFileName: upload.fileName, surfaceRoleLabel: roleLabel,
-        });
-      }}
-      onPointerMove={(e) => {
-        e.stopPropagation();
-        onHover({
-          x: e.clientX, y: e.clientY, domain: roleLabel, volume: 0,
-          surfaceFileName: upload.fileName, surfaceRoleLabel: roleLabel,
-        });
-      }}
-      onPointerOut={() => onHover(null)}
-      onClick={(e) => {
-        e.stopPropagation();
-        onSelect(id, {
-          type: 'surface', id, label: roleLabel,
-          surfaceFileName: upload.fileName, surfaceRole: upload.role,
-          ...surfaceMeta,
-        });
-      }}
-    />
+    <group>
+      <mesh
+        ref={meshRef}
+        geometry={geometry}
+        frustumCulled
+        onPointerOver={(e) => {
+          e.stopPropagation();
+          onHover({
+            x: e.clientX, y: e.clientY, domain: roleLabel, volume: 0,
+            surfaceFileName: upload.fileName, surfaceRoleLabel: roleLabel,
+          });
+        }}
+        onPointerMove={(e) => {
+          e.stopPropagation();
+          onHover({
+            x: e.clientX, y: e.clientY, domain: roleLabel, volume: 0,
+            surfaceFileName: upload.fileName, surfaceRoleLabel: roleLabel,
+          });
+        }}
+        onPointerOut={() => onHover(null)}
+        onClick={(e) => {
+          e.stopPropagation();
+          onSelect(id, {
+            type: 'surface', id, label: roleLabel,
+            surfaceFileName: upload.fileName, surfaceRole: upload.role,
+            ...surfaceMeta,
+          });
+        }}
+      >
+        <meshPhongMaterial
+          ref={matRef}
+          color={style.color}
+          opacity={style.opacity}
+          transparent={style.opacity < 1}
+          side={THREE.DoubleSide}
+          flatShading={false}
+          shininess={10}
+        />
+      </mesh>
+      {edgesGeo && (
+        <lineSegments ref={edgesRef} geometry={edgesGeo} frustumCulled>
+          <lineBasicMaterial color={isDark ? EDGE_COLOR_DARK : EDGE_COLOR_LIGHT} transparent opacity={0.3} />
+        </lineSegments>
+      )}
+    </group>
   );
 }
 
 function buildBatchedGeometry(
   solids: FlatDomainSolid[],
-): { geometry: THREE.BufferGeometry; triRanges: { start: number; end: number; solidIdx: number }[] } {
+): { geometry: THREE.BufferGeometry; triRanges: { start: number; end: number; solidIdx: number }[]; totalTris: number } {
   let totalVerts = 0;
   let totalIndices = 0;
   for (const s of solids) {
@@ -318,63 +246,37 @@ function buildBatchedGeometry(
   geo.setIndex(new THREE.BufferAttribute(indices, 1));
   geo.computeVertexNormals();
   geo.computeBoundingSphere();
-  return { geometry: geo, triRanges };
+  (geo as any).boundsTree = new MeshBVH(geo);
+  return { geometry: geo, triRanges, totalTris: triOffset };
 }
 
 function BatchedDomainGroup({
-  domain, solids, visible, style, selected, highlighted, isDark, lodLevel, onHover, onSelect,
+  domain, solids, visible, style, selected, highlighted, isDark, onHover, onSelect,
 }: DomainGroupProps) {
   const meshRef = useRef<THREE.Mesh>(null);
+  const edgesRef = useRef<THREE.LineSegments>(null);
+  const matRef = useRef<THREE.MeshPhongMaterial>(null);
 
-  const { fullGeo, triRanges, lodGeos } = useMemo(() => {
-    const { geometry: full, triRanges: ranges } = buildBatchedGeometry(solids);
-    const posAttr = full.getAttribute('position') as THREE.BufferAttribute;
-    const idxAttr = full.index!;
-    const positions = posAttr.array as Float32Array;
-    const indices = idxAttr.array as Uint32Array;
-
-    const baryFull = addBarycentricAttribute(full);
-
-    const totalTris = indices.length / 3;
-    const lods: THREE.BufferGeometry[] = [];
-
-    if (totalTris > 1000) {
-      const med = decimateGeometry(positions, indices, 0.25);
-      const medGeo = new THREE.BufferGeometry();
-      medGeo.setAttribute('position', new THREE.BufferAttribute(med.positions, 3));
-      medGeo.setIndex(new THREE.BufferAttribute(med.indices, 1));
-      medGeo.computeVertexNormals();
-      lods.push(addBarycentricAttribute(medGeo));
-
-      const low = decimateGeometry(positions, indices, 0.05);
-      const lowGeo = new THREE.BufferGeometry();
-      lowGeo.setAttribute('position', new THREE.BufferAttribute(low.positions, 3));
-      lowGeo.setIndex(new THREE.BufferAttribute(low.indices, 1));
-      lowGeo.computeVertexNormals();
-      lods.push(addBarycentricAttribute(lowGeo));
-    }
-
-    return { fullGeo: baryFull, triRanges: ranges, lodGeos: lods };
+  const { geo, triRanges, totalTris } = useMemo(() => {
+    const result = buildBatchedGeometry(solids);
+    return { geo: result.geometry, triRanges: result.triRanges, totalTris: result.totalTris };
   }, [solids]);
 
-  const activeGeo = lodLevel === 0 ? fullGeo :
-    lodLevel === 1 && lodGeos.length > 0 ? lodGeos[0] :
-    lodLevel === 2 && lodGeos.length > 1 ? lodGeos[1] :
-    fullGeo;
-
-  const material = useMemo(
-    () => createWireframeMaterial(style.color, style.opacity, isDark, selected),
-    [],
-  );
+  const edgesGeo = useMemo(() => {
+    if (totalTris >= EDGES_TRI_THRESHOLD) return null;
+    return new THREE.EdgesGeometry(geo, 30);
+  }, [geo, totalTris]);
 
   useEffect(() => {
+    if (!matRef.current) return;
     const c = new THREE.Color(style.color);
-    if (highlighted) c.lerp(new THREE.Color('#ffffff'), 0.25);
-    material.uniforms.uColor.value.copy(c);
-    material.uniforms.uOpacity.value = style.opacity;
-    material.uniforms.uSelected.value = selected;
-    material.uniforms.uEdgeColor.value.set(isDark ? '#555555' : '#888888');
-  }, [style.color, style.opacity, selected, highlighted, isDark, material]);
+    if (selected) c.lerp(new THREE.Color('#ffffff'), 0.15);
+    else if (highlighted) c.lerp(new THREE.Color('#ffffff'), 0.25);
+    matRef.current.color.copy(c);
+    matRef.current.opacity = style.opacity;
+    matRef.current.transparent = style.opacity < 1;
+    matRef.current.needsUpdate = true;
+  }, [style.color, style.opacity, selected, highlighted]);
 
   const findSolid = useCallback((faceIndex: number) => {
     for (const range of triRanges) {
@@ -390,85 +292,69 @@ function BatchedDomainGroup({
   const id = `domain-${domain}`;
 
   return (
-    <mesh
-      ref={meshRef}
-      geometry={activeGeo}
-      material={material}
-      frustumCulled
-      onPointerOver={(e) => {
-        e.stopPropagation();
-        const solid = e.faceIndex != null ? findSolid(e.faceIndex) : solids[0];
-        onHover({
-          x: e.clientX, y: e.clientY, domain: solid?.label ?? domain,
-          volume: solid?.volume ?? 0, blockName: solid?.block_name,
-        });
-      }}
-      onPointerMove={(e) => {
-        e.stopPropagation();
-        const solid = e.faceIndex != null ? findSolid(e.faceIndex) : solids[0];
-        onHover({
-          x: e.clientX, y: e.clientY, domain: solid?.label ?? domain,
-          volume: solid?.volume ?? 0, blockName: solid?.block_name,
-        });
-      }}
-      onPointerOut={() => onHover(null)}
-      onClick={(e) => {
-        e.stopPropagation();
-        const solid = e.faceIndex != null ? findSolid(e.faceIndex) : solids[0];
-        const solidId = `domain-${solid?.domain ?? domain}-${solid?.block_name ?? ''}`;
-        let bbox: SelectionInfo['bbox'] | undefined;
-        if (solid) {
-          const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
-          for (let i = 0; i < solid.vertexCount; i++) {
-            const x = solid.positions[i * 3], y = solid.positions[i * 3 + 1], z = solid.positions[i * 3 + 2];
-            if (x < box.minX) box.minX = x; if (x > box.maxX) box.maxX = x;
-            if (y < box.minY) box.minY = y; if (y > box.maxY) box.maxY = y;
-            if (z < box.minZ) box.minZ = z; if (z > box.maxZ) box.maxZ = z;
+    <group>
+      <mesh
+        ref={meshRef}
+        geometry={geo}
+        frustumCulled
+        onPointerOver={(e) => {
+          e.stopPropagation();
+          const solid = e.faceIndex != null ? findSolid(e.faceIndex) : solids[0];
+          onHover({
+            x: e.clientX, y: e.clientY, domain: solid?.label ?? domain,
+            volume: solid?.volume ?? 0, blockName: solid?.block_name,
+          });
+        }}
+        onPointerMove={(e) => {
+          e.stopPropagation();
+          const solid = e.faceIndex != null ? findSolid(e.faceIndex) : solids[0];
+          onHover({
+            x: e.clientX, y: e.clientY, domain: solid?.label ?? domain,
+            volume: solid?.volume ?? 0, blockName: solid?.block_name,
+          });
+        }}
+        onPointerOut={() => onHover(null)}
+        onClick={(e) => {
+          e.stopPropagation();
+          const solid = e.faceIndex != null ? findSolid(e.faceIndex) : solids[0];
+          const solidId = `domain-${solid?.domain ?? domain}-${solid?.block_name ?? ''}`;
+          let bbox: SelectionInfo['bbox'] | undefined;
+          if (solid) {
+            const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
+            for (let i = 0; i < solid.vertexCount; i++) {
+              const x = solid.positions[i * 3], y = solid.positions[i * 3 + 1], z = solid.positions[i * 3 + 2];
+              if (x < box.minX) box.minX = x; if (x > box.maxX) box.maxX = x;
+              if (y < box.minY) box.minY = y; if (y > box.maxY) box.maxY = y;
+              if (z < box.minZ) box.minZ = z; if (z > box.maxZ) box.maxZ = z;
+            }
+            bbox = box;
           }
-          bbox = box;
-        }
-        onSelect(solidId, {
-          type: 'domain', id: solidId, domain: solid?.domain ?? domain,
-          label: solid?.label ?? domain, volume: solid?.volume ?? 0,
-          blockName: solid?.block_name,
-          vertexCount: solid?.vertexCount, triangleCount: solid?.triangleCount,
-          bbox,
-        });
-      }}
-    />
+          onSelect(solidId, {
+            type: 'domain', id: solidId, domain: solid?.domain ?? domain,
+            label: solid?.label ?? domain, volume: solid?.volume ?? 0,
+            blockName: solid?.block_name,
+            vertexCount: solid?.vertexCount, triangleCount: solid?.triangleCount,
+            bbox,
+          });
+        }}
+      >
+        <meshPhongMaterial
+          ref={matRef}
+          color={style.color}
+          opacity={style.opacity}
+          transparent={style.opacity < 1}
+          side={THREE.DoubleSide}
+          flatShading={false}
+          shininess={10}
+        />
+      </mesh>
+      {edgesGeo && (
+        <lineSegments ref={edgesRef} geometry={edgesGeo} frustumCulled>
+          <lineBasicMaterial color={isDark ? EDGE_COLOR_DARK : EDGE_COLOR_LIGHT} transparent opacity={0.3} />
+        </lineSegments>
+      )}
+    </group>
   );
-}
-
-function LODController({ onLodChange }: { onLodChange: (level: number) => void }) {
-  const { camera } = useThree();
-  const orbitingRef = useRef(false);
-  const lastPosRef = useRef(new THREE.Vector3());
-  const stableFramesRef = useRef(0);
-  const currentLodRef = useRef(0);
-
-  useFrame(() => {
-    const pos = camera.position;
-    const dist = pos.distanceTo(lastPosRef.current);
-    lastPosRef.current.copy(pos);
-
-    if (dist > 0.01) {
-      orbitingRef.current = true;
-      stableFramesRef.current = 0;
-      if (currentLodRef.current !== 2) {
-        currentLodRef.current = 2;
-        onLodChange(2);
-      }
-    } else {
-      stableFramesRef.current++;
-      if (orbitingRef.current && stableFramesRef.current > 15) {
-        orbitingRef.current = false;
-        currentLodRef.current = 0;
-        onLodChange(0);
-      }
-    }
-  });
-
-  return null;
 }
 
 function AutoFit({ flatDomains, visible }: { flatDomains: FlatDomainSolid[]; visible: Set<string> }) {
@@ -846,8 +732,12 @@ function ClickToPivot({ controlsRef, disabled }: { controlsRef: React.MutableRef
 
   useEffect(() => {
     const canvas = gl.domElement;
+    let lastDblClick = 0;
     const onDblClick = (e: MouseEvent) => {
       if (disabledRef.current) return;
+      const now = performance.now();
+      if (now - lastDblClick < 100) return;
+      lastDblClick = now;
       const rect = canvas.getBoundingClientRect();
       const mouse = new THREE.Vector2(
         ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -858,7 +748,9 @@ function ClickToPivot({ controlsRef, disabled }: { controlsRef: React.MutableRef
       scene.traverse((obj) => {
         if ((obj as THREE.Mesh).isMesh && obj.visible) meshes.push(obj as THREE.Mesh);
       });
+      raycaster.firstHitOnly = true;
       const intersects = raycaster.intersectObjects(meshes, false);
+      raycaster.firstHitOnly = false;
       if (intersects.length > 0 && controlsRef.current) {
         controlsRef.current.target.copy(intersects[0].point);
         controlsRef.current.update();
@@ -991,7 +883,7 @@ function CursorElevation({
     let lastTime = 0;
     const onMove = (e: MouseEvent) => {
       const now = performance.now();
-      if (now - lastTime < 16) return;
+      if (now - lastTime < 33) return;
       lastTime = now;
       const rect = canvas.getBoundingClientRect();
       const mouse = new THREE.Vector2(
@@ -1003,7 +895,9 @@ function CursorElevation({
       scene.traverse((obj) => {
         if ((obj as THREE.Mesh).isMesh && obj.visible) meshes.push(obj as THREE.Mesh);
       });
+      raycaster.firstHitOnly = true;
       const intersects = raycaster.intersectObjects(meshes, false);
+      raycaster.firstHitOnly = false;
       if (intersects.length > 0) {
         const p = intersects[0].point;
         onUpdate({ x: p.x, y: p.y, z: p.z });
@@ -1060,7 +954,6 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [cursorElev, setCursorElev] = useState<{ x: number; y: number; z: number } | null>(null);
   const [viewPreset, setViewPreset] = useState<ViewPreset | null>(null);
-  const [lodLevel, setLodLevel] = useState(0);
   const [measureLabels, setMeasureLabels] = useState<{ id: number; x: number; y: number; text: string; dz: string }[]>([]);
   const controlsRef = useRef<any>(null);
 
@@ -1181,8 +1074,6 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           args={[isDark ? '#334155' : '#d4e5f7', isDark ? '#0f172a' : '#f5f0e6', isDark ? 0.15 : 0.2]}
         />
 
-        <LODController onLodChange={setLodLevel} />
-
         {[...domainGroups.entries()].map(([domain, solids]) => {
           const id = `domain-${domain}`;
           const defaultStyle: ObjectStyle = { color: solids[0].color, opacity: 0.85, wireframe: false };
@@ -1197,7 +1088,6 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
               selected={selectedId?.startsWith(id) ?? false}
               highlighted={hoveredId?.startsWith(id) ?? false}
               isDark={isDark}
-              lodLevel={lodLevel}
               onHover={handleHover}
               onSelect={handleMeshClick}
             />

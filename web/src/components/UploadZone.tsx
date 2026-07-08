@@ -6,10 +6,9 @@ interface Props {
   uploads: Map<SurfaceRole, UploadedSurface>;
   onFileSelected: (role: SurfaceRole, file: File) => void;
   onLoadSample: () => void;
-  decimationWarnings: Map<SurfaceRole, number>;
 }
 
-export default function UploadZone({ uploads, onFileSelected, onLoadSample, decimationWarnings }: Props) {
+export default function UploadZone({ uploads, onFileSelected, onLoadSample }: Props) {
   const fileInputRefs = useRef<Map<SurfaceRole, HTMLInputElement>>(new Map());
 
   const handleDrop = useCallback(
@@ -42,7 +41,6 @@ export default function UploadZone({ uploads, onFileSelected, onLoadSample, deci
       <div className="space-y-2">
         {SURFACE_ROLES.map(({ key, label }) => {
           const entry = uploads.get(key);
-          const warning = decimationWarnings.get(key);
           return (
             <div
               key={key}
@@ -51,31 +49,21 @@ export default function UploadZone({ uploads, onFileSelected, onLoadSample, deci
               onClick={() => fileInputRefs.current.get(key)?.click()}
               className={`group flex cursor-pointer items-center gap-2 rounded-lg border border-dashed px-3 py-2 text-xs transition-colors ${
                 entry
-                  ? warning
-                    ? 'border-amber-500/40 bg-amber-500/10'
-                    : 'border-emerald-500/40 bg-emerald-500/10'
+                  ? 'border-emerald-500/40 bg-emerald-500/10'
                   : 'border-slate-600 hover:border-slate-400 hover:bg-white/5'
               }`}
             >
               <div
                 className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
                   entry
-                    ? warning
-                      ? 'bg-amber-500 text-white'
-                      : 'bg-emerald-500 text-white'
+                    ? 'bg-emerald-500 text-white'
                     : 'bg-slate-700 text-slate-400'
                 }`}
               >
                 {entry ? (
-                  warning ? (
-                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01" />
-                    </svg>
-                  ) : (
-                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                    </svg>
-                  )
+                  <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
                 ) : (
                   SURFACE_ROLES.findIndex((r) => r.key === key) + 1
                 )}
@@ -91,11 +79,6 @@ export default function UploadZone({ uploads, onFileSelected, onLoadSample, deci
                 {entry && (
                   <div className="truncate text-[10px] text-slate-500">
                     {entry.fileName}
-                    {warning && (
-                      <span className="ml-1 text-amber-400">
-                        ({(warning / 1000).toFixed(0)}K tris)
-                      </span>
-                    )}
                   </div>
                 )}
               </div>

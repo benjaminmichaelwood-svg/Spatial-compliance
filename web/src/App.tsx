@@ -37,7 +37,6 @@ import CrossSectionPanel from './components/CrossSectionPanel';
 import ReportPanel from './components/report/ReportPanel';
 import { computeCrossSection } from './utils/crossSection';
 
-const DECIMATION_WARNING_THRESHOLD = 200_000;
 
 function makeFlatSurface(z: number, name: string, size = 20): TriSurface {
   const vertices: Vec3[] = [
@@ -162,7 +161,7 @@ export default function App() {
 
   const [showPerf, setShowPerf] = useState(false);
   const [progress, setProgress] = useState<{ phase: string; value: number } | null>(null);
-  const [decimationWarnings, setDecimationWarnings] = useState<Map<SurfaceRole, number>>(new Map());
+
 
   useEffect(() => {
     const base = import.meta.env.BASE_URL ?? '/';
@@ -320,19 +319,6 @@ export default function App() {
         next.set(role, { role, surface: triSurface, fileName: file.name });
         setUploads(next);
 
-        if (flatSurface.triangleCount > DECIMATION_WARNING_THRESHOLD) {
-          setDecimationWarnings(prev => {
-            const next = new Map(prev);
-            next.set(role, flatSurface.triangleCount);
-            return next;
-          });
-        } else {
-          setDecimationWarnings(prev => {
-            const next = new Map(prev);
-            next.delete(role);
-            return next;
-          });
-        }
       } catch (e: any) {
         setError(e.message || String(e));
       } finally {
@@ -375,7 +361,6 @@ export default function App() {
       }
     }
     setUploads(next);
-    setDecimationWarnings(new Map());
   }, [mode, useWorker]);
 
   const handleRun = useCallback(async () => {
@@ -587,18 +572,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Decimation warnings */}
-      {decimationWarnings.size > 0 && (
-        <div className="absolute left-64 right-0 top-12 z-40 bg-amber-900/90 px-4 py-1.5 text-xs text-amber-200">
-          <span className="font-medium">Large surface warning:</span>{' '}
-          {[...decimationWarnings.entries()].map(([role, count]) => {
-            const label = SURFACE_ROLES.find(r => r.key === role)?.label ?? role;
-            return `${label} (${(count / 1000).toFixed(0)}K triangles)`;
-          }).join(', ')}{' '}
-          exceed {(DECIMATION_WARNING_THRESHOLD / 1000).toFixed(0)}K triangles. LOD will auto-decimate during orbit.
-        </div>
-      )}
-
       {/* Header */}
       <header className="flex h-11 flex-shrink-0 items-center justify-between border-b border-slate-700 bg-slate-900 px-3">
         <div className="flex items-center gap-3">
@@ -617,7 +590,6 @@ export default function App() {
               setMeasurePoints([]);
               setSelectedId(null);
               setSelectionInfo(null);
-              setDecimationWarnings(new Map());
               if (useWorker) workerClearSurfaces();
             }}
             className="text-sm text-slate-500 transition-colors hover:text-slate-300"
@@ -776,7 +748,6 @@ export default function App() {
             uploads={uploads}
             onFileSelected={handleFileSelected}
             onLoadSample={handleLoadSample}
-            decimationWarnings={decimationWarnings}
           />
           <SettingsPanel settings={settings} onChange={setSettings} />
           <BoundaryPanel

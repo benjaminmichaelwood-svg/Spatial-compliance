@@ -16,7 +16,8 @@
     "react-dom": "^19.0.0",
     "recharts": "^3.9.2",
     "spatial-engine": "file:../crates/spatial-engine/pkg",
-    "three": "^0.185.0"
+    "three": "^0.185.0",
+    "three-mesh-bvh": "^0.9.10"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
