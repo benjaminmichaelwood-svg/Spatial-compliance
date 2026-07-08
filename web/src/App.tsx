@@ -32,7 +32,7 @@ import SettingsPanel from './components/SettingsPanel';
 import BoundaryPanel from './components/BoundaryPanel';
 import LayerPanel from './components/LayerPanel';
 import Viewer from './components/Viewer';
-import type { ViewerHandle, SelectionInfo, MeasurePoint } from './components/Viewer';
+import type { ViewerHandle, SelectionInfo, MeasurePoint, SavedMeasurement } from './components/Viewer';
 import CrossSectionPanel from './components/CrossSectionPanel';
 import ReportPanel from './components/report/ReportPanel';
 import { computeCrossSection } from './utils/crossSection';
@@ -157,6 +157,8 @@ export default function App() {
   const [selectionInfo, setSelectionInfo] = useState<SelectionInfo | null>(null);
   const [measureTool, setMeasureTool] = useState<MeasureTool>('none');
   const [measurePoints, setMeasurePoints] = useState<MeasurePoint[]>([]);
+  const [savedMeasurements, setSavedMeasurements] = useState<SavedMeasurement[]>([]);
+  const measureIdRef = useRef(0);
 
   const [showPerf, setShowPerf] = useState(false);
   const [progress, setProgress] = useState<{ phase: string; value: number } | null>(null);
@@ -498,7 +500,19 @@ export default function App() {
 
   const handleAddMeasurePoint = useCallback((point: MeasurePoint) => {
     setMeasurePoints((prev) => {
-      if (measureTool === 'distance' && prev.length >= 2) return [point];
+      if (measureTool === 'distance') {
+        if (prev.length === 1) {
+          const p1 = prev[0].position;
+          const p2 = point.position;
+          const dist = p1.distanceTo(p2);
+          setSavedMeasurements((sm) => [
+            ...sm,
+            { id: ++measureIdRef.current, p1: p1.clone(), p2: p2.clone(), distance: dist },
+          ]);
+          return [];
+        }
+        return [point];
+      }
       if (measureTool === 'elevation') return [point];
       return [...prev, point];
     });
@@ -689,6 +703,18 @@ export default function App() {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5z" />
                 </svg>
               </button>
+              {savedMeasurements.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => { setSavedMeasurements([]); setMeasurePoints([]); }}
+                  className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white transition-colors"
+                  title="Clear all measurements"
+                >
+                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+              )}
             </div>
 
             <div className="mx-1 h-4 w-px bg-slate-700" />
@@ -882,6 +908,7 @@ export default function App() {
                       measureTool={measureTool}
                       measurePoints={measurePoints}
                       onAddMeasurePoint={handleAddMeasurePoint}
+                      savedMeasurements={savedMeasurements}
                       showPerf={showPerf}
                     />
                   </div>
@@ -962,7 +989,37 @@ export default function App() {
                 {selectionInfo.surfaceRole && (
                   <div>
                     <div className="text-[10px] text-slate-500 uppercase tracking-wide">Role</div>
-                    <div className="text-xs font-medium">{selectionInfo.surfaceRole}</div>
+                    <div className="text-xs font-medium">
+                      {SURFACE_ROLES.find((r) => r.key === selectionInfo.surfaceRole)?.label ?? selectionInfo.surfaceRole}
+                    </div>
+                  </div>
+                )}
+                {selectionInfo.vertexCount !== undefined && (
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Vertices</div>
+                    <div className="text-xs font-mono">{selectionInfo.vertexCount.toLocaleString()}</div>
+                  </div>
+                )}
+                {selectionInfo.triangleCount !== undefined && (
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Triangles</div>
+                    <div className="text-xs font-mono">{selectionInfo.triangleCount.toLocaleString()}</div>
+                  </div>
+                )}
+                {selectionInfo.bbox && (
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-0.5">Bounding Box</div>
+                    <div className="grid grid-cols-[auto_1fr_1fr] gap-x-1.5 gap-y-0.5 text-[10px] font-mono">
+                      <span className="text-slate-500">E</span>
+                      <span className="text-slate-300">{selectionInfo.bbox.minX.toFixed(1)}</span>
+                      <span className="text-slate-300">{selectionInfo.bbox.maxX.toFixed(1)}</span>
+                      <span className="text-slate-500">N</span>
+                      <span className="text-slate-300">{selectionInfo.bbox.minY.toFixed(1)}</span>
+                      <span className="text-slate-300">{selectionInfo.bbox.maxY.toFixed(1)}</span>
+                      <span className="text-slate-500">RL</span>
+                      <span className="text-slate-300">{selectionInfo.bbox.minZ.toFixed(1)}</span>
+                      <span className="text-slate-300">{selectionInfo.bbox.maxZ.toFixed(1)}</span>
+                    </div>
                   </div>
                 )}
               </div>

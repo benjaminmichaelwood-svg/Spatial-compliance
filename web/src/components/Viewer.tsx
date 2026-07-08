@@ -150,12 +150,22 @@ export interface SelectionInfo {
   blockName?: string;
   surfaceFileName?: string;
   surfaceRole?: string;
+  vertexCount?: number;
+  triangleCount?: number;
+  bbox?: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number };
 }
 
 export interface MeasurePoint {
   position: THREE.Vector3;
   screenX: number;
   screenY: number;
+}
+
+export interface SavedMeasurement {
+  id: number;
+  p1: THREE.Vector3;
+  p2: THREE.Vector3;
+  distance: number;
 }
 
 const DEFAULT_SURFACE_COLORS: Record<SurfaceRole, string> = {
@@ -223,6 +233,17 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
   const roleLabel = SURFACE_ROLES.find((r) => r.key === upload.role)?.label ?? upload.role;
   const id = `surface-${upload.role}`;
 
+  const surfaceMeta = useMemo(() => {
+    const verts = upload.surface.vertices;
+    const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
+    for (const v of verts) {
+      if (v.x < box.minX) box.minX = v.x; if (v.x > box.maxX) box.maxX = v.x;
+      if (v.y < box.minY) box.minY = v.y; if (v.y > box.maxY) box.maxY = v.y;
+      if (v.z < box.minZ) box.minZ = v.z; if (v.z > box.maxZ) box.maxZ = v.z;
+    }
+    return { vertexCount: verts.length, triangleCount: upload.surface.indices.length, bbox: box };
+  }, [upload.surface]);
+
   return (
     <mesh
       ref={meshRef}
@@ -249,6 +270,7 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
         onSelect(id, {
           type: 'surface', id, label: roleLabel,
           surfaceFileName: upload.fileName, surfaceRole: upload.role,
+          ...surfaceMeta,
         });
       }}
     />
@@ -394,10 +416,23 @@ function BatchedDomainGroup({
         e.stopPropagation();
         const solid = e.faceIndex != null ? findSolid(e.faceIndex) : solids[0];
         const solidId = `domain-${solid?.domain ?? domain}-${solid?.block_name ?? ''}`;
+        let bbox: SelectionInfo['bbox'] | undefined;
+        if (solid) {
+          const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
+          for (let i = 0; i < solid.vertexCount; i++) {
+            const x = solid.positions[i * 3], y = solid.positions[i * 3 + 1], z = solid.positions[i * 3 + 2];
+            if (x < box.minX) box.minX = x; if (x > box.maxX) box.maxX = x;
+            if (y < box.minY) box.minY = y; if (y > box.maxY) box.maxY = y;
+            if (z < box.minZ) box.minZ = z; if (z > box.maxZ) box.maxZ = z;
+          }
+          bbox = box;
+        }
         onSelect(solidId, {
           type: 'domain', id: solidId, domain: solid?.domain ?? domain,
           label: solid?.label ?? domain, volume: solid?.volume ?? 0,
           blockName: solid?.block_name,
+          vertexCount: solid?.vertexCount, triangleCount: solid?.triangleCount,
+          bbox,
         });
       }}
     />
@@ -544,28 +579,55 @@ function ViewPresetController({ preset, flatDomains, uploads, onDone }: ViewPres
 function MeasureOverlay3D({
   points,
   tool,
+  savedMeasurements,
+  sphereRadius,
 }: {
   points: MeasurePoint[];
   tool: MeasureTool;
+  savedMeasurements: SavedMeasurement[];
+  sphereRadius: number;
 }) {
-  if (points.length === 0 || tool === 'none') return null;
-
-  const linePoints: [number, number, number][] = points.map(p => [p.position.x, p.position.y, p.position.z]);
-  if (tool === 'area' && points.length > 2) {
-    linePoints.push([points[0].position.x, points[0].position.y, points[0].position.z]);
-  }
+  const markerR = sphereRadius * 0.5;
 
   return (
     <>
-      {linePoints.length >= 2 && (
-        <Line points={linePoints} color="#22d3ee" lineWidth={2} />
-      )}
-      {points.map((p, i) => (
-        <mesh key={i} position={p.position}>
-          <sphereGeometry args={[0.3, 12, 12]} />
-          <meshBasicMaterial color="#22d3ee" />
-        </mesh>
+      {savedMeasurements.map((m) => (
+        <group key={m.id}>
+          <Line
+            points={[[m.p1.x, m.p1.y, m.p1.z], [m.p2.x, m.p2.y, m.p2.z]]}
+            color="#22d3ee"
+            lineWidth={2}
+          />
+          <mesh position={m.p1}>
+            <sphereGeometry args={[markerR, 12, 12]} />
+            <meshBasicMaterial color="#22d3ee" />
+          </mesh>
+          <mesh position={m.p2}>
+            <sphereGeometry args={[markerR, 12, 12]} />
+            <meshBasicMaterial color="#22d3ee" />
+          </mesh>
+        </group>
       ))}
+
+      {tool !== 'none' && points.length > 0 && (() => {
+        const linePoints: [number, number, number][] = points.map(p => [p.position.x, p.position.y, p.position.z]);
+        if (tool === 'area' && points.length > 2) {
+          linePoints.push([points[0].position.x, points[0].position.y, points[0].position.z]);
+        }
+        return (
+          <>
+            {linePoints.length >= 2 && (
+              <Line points={linePoints} color="#22d3ee" lineWidth={2} />
+            )}
+            {points.map((p, i) => (
+              <mesh key={i} position={p.position}>
+                <sphereGeometry args={[markerR, 12, 12]} />
+                <meshBasicMaterial color="#22d3ee" />
+              </mesh>
+            ))}
+          </>
+        );
+      })()}
     </>
   );
 }
@@ -877,6 +939,46 @@ function KeyboardShortcuts({
   return null;
 }
 
+function MeasureLabelsProjector({
+  savedMeasurements,
+  onUpdate,
+}: {
+  savedMeasurements: SavedMeasurement[];
+  onUpdate: (labels: { id: number; x: number; y: number; text: string; dz: string }[]) => void;
+}) {
+  const { camera, gl } = useThree();
+  const prevJson = useRef('');
+
+  useFrame(() => {
+    if (savedMeasurements.length === 0) {
+      if (prevJson.current !== '[]') {
+        prevJson.current = '[]';
+        onUpdate([]);
+      }
+      return;
+    }
+    const rect = gl.domElement.getBoundingClientRect();
+    const labels = savedMeasurements.map((m) => {
+      const mid = new THREE.Vector3().addVectors(m.p1, m.p2).multiplyScalar(0.5);
+      mid.project(camera);
+      return {
+        id: m.id,
+        x: (mid.x * 0.5 + 0.5) * rect.width,
+        y: (-mid.y * 0.5 + 0.5) * rect.height,
+        text: `${m.distance.toFixed(2)} m`,
+        dz: `${String.fromCharCode(0x0394)}Z: ${Math.abs(m.p2.z - m.p1.z).toFixed(2)} m`,
+      };
+    });
+    const json = JSON.stringify(labels.map(l => [l.x | 0, l.y | 0]));
+    if (json !== prevJson.current) {
+      prevJson.current = json;
+      onUpdate(labels);
+    }
+  });
+
+  return null;
+}
+
 function CursorElevation({
   onUpdate,
 }: {
@@ -943,6 +1045,7 @@ export interface ViewerProps {
   measureTool: MeasureTool;
   measurePoints: MeasurePoint[];
   onAddMeasurePoint: (point: MeasurePoint) => void;
+  savedMeasurements: SavedMeasurement[];
   showPerf: boolean;
 }
 
@@ -950,7 +1053,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   flatDomains, visible, canvasRef, boundaries, isDrawing, drawPoints, onAddDrawPoint, onFinishDrawing,
   uploads, surfaceVisible, isDrawingSection, sectionLine, onSectionLineChange,
   onSectionDrawComplete, background, domainStyles, surfaceStyles, selectedId,
-  onSelect, measureTool, measurePoints, onAddMeasurePoint, showPerf,
+  onSelect, measureTool, measurePoints, onAddMeasurePoint, savedMeasurements, showPerf,
 }, ref) {
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null);
   const [isDraggingEndpoint, setIsDraggingEndpoint] = useState(false);
@@ -958,6 +1061,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   const [cursorElev, setCursorElev] = useState<{ x: number; y: number; z: number } | null>(null);
   const [viewPreset, setViewPreset] = useState<ViewPreset | null>(null);
   const [lodLevel, setLodLevel] = useState(0);
+  const [measureLabels, setMeasureLabels] = useState<{ id: number; x: number; y: number; text: string; dz: string }[]>([]);
   const controlsRef = useRef<any>(null);
 
   useImperativeHandle(ref, () => ({
@@ -1136,7 +1240,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
         <BoundaryLines boundaries={boundaries} displayZ={displayZ} />
         <DrawingLayer points={drawPoints} isDrawing={isDrawing} onAddPoint={onAddDrawPoint} onFinish={onFinishDrawing} displayZ={displayZ} sphereRadius={sphereRadius} />
 
-        <MeasureOverlay3D points={measurePoints} tool={measureTool} />
+        <MeasureOverlay3D points={measurePoints} tool={measureTool} savedMeasurements={savedMeasurements} sphereRadius={sphereRadius} />
 
         {measureTool !== 'none' && (
           <mesh visible={false} onClick={handleCanvasClick} position={[0, 0, displayZ]}>
@@ -1153,6 +1257,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           onDone={() => setViewPreset(null)}
         />
         <CursorElevation onUpdate={setCursorElev} />
+        <MeasureLabelsProjector savedMeasurements={savedMeasurements} onUpdate={setMeasureLabels} />
 
         <OrbitControls
           ref={controlsRef}
@@ -1182,10 +1287,9 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           style={{ left: tooltip.x + 12, top: tooltip.y - 40 }}
         >
           {tooltip.surfaceFileName ? (
-            <>
-              <div className="font-semibold">{tooltip.surfaceRoleLabel}</div>
-              <div className="text-slate-300">{tooltip.surfaceFileName}</div>
-            </>
+            <div className="font-medium">
+              {tooltip.surfaceFileName} &mdash; {tooltip.surfaceRoleLabel}
+            </div>
           ) : (
             <>
               <div className="font-semibold">{tooltip.domain}</div>
@@ -1196,21 +1300,25 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
         </div>
       )}
 
+      {/* Saved measurement labels */}
+      {measureLabels.map((l) => (
+        <div
+          key={l.id}
+          className="pointer-events-none absolute z-40 rounded bg-cyan-900/90 px-2 py-1 text-[10px] font-mono text-cyan-100 shadow -translate-x-1/2 -translate-y-full"
+          style={{ left: l.x, top: l.y - 8 }}
+        >
+          {l.text} | {l.dz}
+        </div>
+      ))}
+
       {/* Elevation readout */}
       {cursorElev && (
-        <div className={`absolute bottom-2 ${showPerf ? 'right-36' : 'right-2'} rounded px-2 py-1 text-[10px] font-mono ${isDark ? 'bg-black/70 text-slate-300' : 'bg-white/90 text-slate-600'} shadow`}>
-          E {cursorElev.x.toFixed(1)} &nbsp; N {cursorElev.y.toFixed(1)} &nbsp; RL {cursorElev.z.toFixed(1)}
+        <div className={`absolute bottom-2 left-2 rounded px-2 py-1 text-[11px] font-mono ${isDark ? 'bg-black/70 text-slate-300' : 'bg-white/90 text-slate-600'} shadow`}>
+          RL: {cursorElev.z.toFixed(2)}m
         </div>
       )}
 
       {/* Measure result overlay */}
-      {measureTool === 'distance' && measurePoints.length === 2 && (
-        <div className="absolute left-1/2 top-3 -translate-x-1/2 rounded bg-cyan-900/90 px-3 py-1.5 text-xs font-medium text-cyan-100 shadow">
-          Distance: {measurePoints[0].position.distanceTo(measurePoints[1].position).toFixed(2)} m
-          &nbsp;|&nbsp; ΔZ: {Math.abs(measurePoints[1].position.z - measurePoints[0].position.z).toFixed(2)} m
-        </div>
-      )}
-
       {measureTool === 'area' && measurePoints.length >= 3 && (() => {
         let area = 0;
         const pts = measurePoints.map(p => p.position);
@@ -1239,7 +1347,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
       )}
       {measureTool !== 'none' && (
         <div className="absolute left-3 top-3 rounded bg-cyan-600/90 px-3 py-1.5 text-xs font-medium text-white shadow">
-          {measureTool === 'distance' && `Click ${2 - measurePoints.length} point${measurePoints.length === 1 ? '' : 's'} to measure distance`}
+          {measureTool === 'distance' && (measurePoints.length === 0 ? 'Click first point to measure distance' : 'Click second point to complete measurement')}
           {measureTool === 'elevation' && 'Hover over surfaces to read elevation'}
           {measureTool === 'area' && `Click points to define area · ${measurePoints.length} placed · Press Enter to close`}
         </div>
