@@ -854,19 +854,35 @@ function ControlsBinder({ controlsRef }: { controlsRef: React.MutableRefObject<a
   return null;
 }
 
-function ClickToPivot({ controlsRef, disabled }: { controlsRef: React.MutableRefObject<any>; disabled?: boolean }) {
+function ZUpEnforcer() {
+  const { camera } = useThree();
+  useFrame(() => {
+    const up = camera.up;
+    if (Math.abs(up.x) > 1e-6 || Math.abs(up.y) > 1e-6 || Math.abs(up.z - 1) > 1e-6) {
+      camera.up.set(0, 0, 1);
+    }
+  });
+  return null;
+}
+
+function SetPivotMode({
+  controlsRef,
+  active,
+  onDone,
+}: {
+  controlsRef: React.MutableRefObject<any>;
+  active: boolean;
+  onDone: () => void;
+}) {
   const { camera, gl, raycaster, scene } = useThree();
-  const disabledRef = useRef(disabled);
-  disabledRef.current = disabled;
 
   useEffect(() => {
+    if (!active) return;
     const canvas = gl.domElement;
-    let lastDblClick = 0;
-    const onDblClick = (e: MouseEvent) => {
-      if (disabledRef.current) return;
-      const now = performance.now();
-      if (now - lastDblClick < 100) return;
-      lastDblClick = now;
+    const prevCursor = canvas.style.cursor;
+    canvas.style.cursor = 'crosshair';
+
+    const onClick = (e: MouseEvent) => {
       const rect = canvas.getBoundingClientRect();
       const mouse = new THREE.Vector2(
         ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -884,10 +900,21 @@ function ClickToPivot({ controlsRef, disabled }: { controlsRef: React.MutableRef
         controlsRef.current.target.copy(intersects[0].point);
         controlsRef.current.update();
       }
+      onDone();
     };
-    canvas.addEventListener('dblclick', onDblClick);
-    return () => canvas.removeEventListener('dblclick', onDblClick);
-  }, [camera, gl, raycaster, scene, controlsRef]);
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onDone();
+    };
+
+    canvas.addEventListener('click', onClick, { once: true });
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      canvas.style.cursor = prevCursor;
+      canvas.removeEventListener('click', onClick);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [active, camera, gl, raycaster, scene, controlsRef, onDone]);
 
   return null;
 }
@@ -896,66 +923,70 @@ function KeyboardShortcuts({
   controlsRef,
   flatDomains,
   uploads,
+  onTogglePivot,
 }: {
   controlsRef: React.MutableRefObject<any>;
   flatDomains: FlatDomainSolid[];
   uploads: Map<SurfaceRole, UploadedSurface>;
+  onTogglePivot: () => void;
 }) {
   const { camera } = useThree();
 
   useEffect(() => {
+    const fitAll = () => {
+      const box = new THREE.Box3();
+      for (const d of flatDomains) {
+        for (let i = 0; i < d.vertexCount; i++) {
+          box.expandByPoint(new THREE.Vector3(d.positions[i * 3], d.positions[i * 3 + 1], d.positions[i * 3 + 2]));
+        }
+      }
+      for (const [, upload] of uploads) {
+        for (let i = 0; i < upload.vertexCount; i++) {
+          box.expandByPoint(new THREE.Vector3(upload.positions[i * 3], upload.positions[i * 3 + 1], upload.positions[i * 3 + 2]));
+        }
+      }
+      if (box.isEmpty()) return;
+
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const cam = camera as THREE.PerspectiveCamera;
+      const fov = cam.fov * (Math.PI / 180);
+      const aspect = cam.aspect;
+      const fitDist = Math.max(
+        maxDim / (2 * Math.tan(fov / 2)),
+        maxDim / (2 * Math.tan(fov * aspect / 2)),
+      ) * 1.2;
+
+      camera.position.set(
+        center.x + fitDist * 0.5,
+        center.y - fitDist * 0.5,
+        center.z + fitDist * 0.4,
+      );
+      camera.lookAt(center);
+      camera.updateProjectionMatrix();
+
+      if (controlsRef.current?.target) {
+        controlsRef.current.target.copy(center);
+        controlsRef.current.update();
+      }
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
       if (e.key === 'z' && !e.ctrlKey && !e.metaKey) {
-        camera.up.set(0, 0, 1);
-        camera.updateProjectionMatrix();
-        if (controlsRef.current) controlsRef.current.update();
+        onTogglePivot();
         return;
       }
 
-      if (e.key === 'f' && !e.ctrlKey && !e.metaKey) {
-        const box = new THREE.Box3();
-        for (const d of flatDomains) {
-          for (let i = 0; i < d.vertexCount; i++) {
-            box.expandByPoint(new THREE.Vector3(d.positions[i * 3], d.positions[i * 3 + 1], d.positions[i * 3 + 2]));
-          }
-        }
-        for (const [, upload] of uploads) {
-          for (let i = 0; i < upload.vertexCount; i++) {
-            box.expandByPoint(new THREE.Vector3(upload.positions[i * 3], upload.positions[i * 3 + 1], upload.positions[i * 3 + 2]));
-          }
-        }
-        if (box.isEmpty()) return;
-
-        const center = box.getCenter(new THREE.Vector3());
-        const size = box.getSize(new THREE.Vector3());
-        const maxDim = Math.max(size.x, size.y, size.z);
-        const cam = camera as THREE.PerspectiveCamera;
-        const fov = cam.fov * (Math.PI / 180);
-        const aspect = cam.aspect;
-        const fitDist = Math.max(
-          maxDim / (2 * Math.tan(fov / 2)),
-          maxDim / (2 * Math.tan(fov * aspect / 2)),
-        ) * 1.2;
-
-        camera.position.set(
-          center.x + fitDist * 0.5,
-          center.y - fitDist * 0.5,
-          center.z + fitDist * 0.4,
-        );
-        camera.lookAt(center);
-        camera.updateProjectionMatrix();
-
-        if (controlsRef.current?.target) {
-          controlsRef.current.target.copy(center);
-          controlsRef.current.update();
-        }
+      if ((e.key === 'f' || e.key === 'r') && !e.ctrlKey && !e.metaKey) {
+        fitAll();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [camera, controlsRef, flatDomains, uploads]);
+  }, [camera, controlsRef, flatDomains, uploads, onTogglePivot]);
 
   return null;
 }
@@ -1089,7 +1120,11 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   const [cursorElev, setCursorElev] = useState<{ x: number; y: number; z: number } | null>(null);
   const [viewPreset, setViewPreset] = useState<ViewPreset | null>(null);
   const [measureLabels, setMeasureLabels] = useState<{ id: number; x: number; y: number; text: string; dz: string }[]>([]);
+  const [pivotMode, setPivotMode] = useState(false);
   const controlsRef = useRef<any>(null);
+
+  const togglePivot = useCallback(() => setPivotMode((v) => !v), []);
+  const exitPivot = useCallback(() => setPivotMode(false), []);
 
   useImperativeHandle(ref, () => ({
     applyPreset: (preset: ViewPreset) => setViewPreset(preset),
@@ -1296,7 +1331,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           makeDefault
           enableDamping
           dampingFactor={0.1}
-          enabled={!isDrawing && !isDrawingSection && !isDraggingEndpoint && measureTool === 'none'}
+          enabled={!isDrawing && !isDrawingSection && !isDraggingEndpoint && measureTool === 'none' && !pivotMode}
           mouseButtons={{
             LEFT: THREE.MOUSE.ROTATE,
             MIDDLE: THREE.MOUSE.PAN,
@@ -1304,12 +1339,16 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           }}
           enableZoom
           zoomSpeed={1.2}
-          maxPolarAngle={Math.PI}
-          minPolarAngle={0}
+          zoomToCursor
+          maxPolarAngle={Math.PI * 0.47}
+          minPolarAngle={0.05}
+          rotateSpeed={0.8}
+          panSpeed={0.8}
         />
         <ControlsBinder controlsRef={controlsRef} />
-        <ClickToPivot controlsRef={controlsRef} disabled={isDrawing} />
-        <KeyboardShortcuts controlsRef={controlsRef} flatDomains={flatDomains} uploads={uploads} />
+        <ZUpEnforcer />
+        <SetPivotMode controlsRef={controlsRef} active={pivotMode} onDone={exitPivot} />
+        <KeyboardShortcuts controlsRef={controlsRef} flatDomains={flatDomains} uploads={uploads} onTogglePivot={togglePivot} />
       </Canvas>
 
       {/* Thickness Legend */}
@@ -1387,6 +1426,11 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
       {isDrawing && (
         <div className="absolute left-3 top-3 rounded bg-orange-500/90 px-3 py-1.5 text-xs font-medium text-white shadow">
           Click to place points · Double-click or press Enter to close
+        </div>
+      )}
+      {pivotMode && (
+        <div className="absolute left-3 top-3 rounded bg-violet-600/90 px-3 py-1.5 text-xs font-medium text-white shadow">
+          Click a surface to set orbit pivot · Escape to cancel
         </div>
       )}
       {isDrawingSection && (
