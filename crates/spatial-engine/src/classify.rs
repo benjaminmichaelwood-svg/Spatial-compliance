@@ -653,7 +653,7 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
 // Per-triangle domain classification for surface painting
 // ---------------------------------------------------------------------------
 
-pub fn classify_surface_domains(input: &ConformanceInput) -> Vec<(usize, Vec<u8>)> {
+pub fn classify_surface_domains(input: &ConformanceInput) -> Vec<(usize, Vec<u8>, Vec<f32>)> {
     let opt_surfaces: [Option<&TriSurface>; 5] = [
         input.production_start,
         input.production_end,
@@ -680,6 +680,7 @@ pub fn classify_surface_domains(input: &ConformanceInput) -> Vec<(usize, Vec<u8>
 
         let num_tris = surface.num_triangles();
         let mut domain_map = vec![0u8; num_tris];
+        let mut thickness_map = vec![0.0f32; num_tris];
 
         for ti in 0..num_tris {
             let tri = surface.triangle(ti);
@@ -721,13 +722,15 @@ pub fn classify_surface_domains(input: &ConformanceInput) -> Vec<(usize, Vec<u8>
                 let tb = b.upper - b.lower;
                 ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
             }) {
-                if best.upper - best.lower > 1e-9 {
+                let thick = (best.upper - best.lower).abs();
+                if thick > 1e-9 {
                     domain_map[ti] = best.domain.index();
+                    thickness_map[ti] = thick as f32;
                 }
             }
         }
 
-        results.push((si, domain_map));
+        results.push((si, domain_map, thickness_map));
     }
 
     results

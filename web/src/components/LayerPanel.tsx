@@ -1,6 +1,13 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useMemo } from 'react';
 import type { ConformanceResult, SurfaceRole, UploadedSurface, ObjectStyle } from '../types';
 import { SURFACE_ROLES } from '../types';
+
+interface ThicknessMode {
+  domain: string;
+  scaleMin: number;
+  scaleMax: number;
+  hideBelow: number | null;
+}
 
 const DEFAULT_SURFACE_COLORS: Record<SurfaceRole, string> = {
   production_start: '#94a3b8',
@@ -21,6 +28,10 @@ interface Props {
   surfaceStyles: Map<SurfaceRole, ObjectStyle>;
   onDomainStyleChange: (domain: string, style: ObjectStyle) => void;
   onSurfaceStyleChange: (role: SurfaceRole, style: ObjectStyle) => void;
+  thicknessMode: ThicknessMode | null;
+  onThicknessModeChange: (mode: ThicknessMode | null) => void;
+  domainMaps: Map<SurfaceRole, Uint8Array>;
+  thicknessMaps: Map<SurfaceRole, Float32Array>;
 }
 
 function formatVolume(v: number): string {
@@ -90,12 +101,47 @@ function StyleControls({
   );
 }
 
+function computeDomainThicknessStats(
+  domain: string,
+  domainMaps: Map<SurfaceRole, Uint8Array>,
+  thicknessMaps: Map<SurfaceRole, Float32Array>,
+): { min: number; max: number; mean: number; p95: number } | null {
+  const DOMAIN_NAME_TO_INDEX: Record<string, number> = {
+    PlannedAndMined: 1, PlannedNotMined: 2, MinedNotPlanned: 3,
+    MinedBeforeStart: 4, PrescheduleDelay: 5, AheadOfPlan: 6,
+    PlannedAndDumped: 7, PlannedNotDumped: 8, DumpedNotPlanned: 9,
+    DumpedBeforeStart: 10, DumpPrescheduleDelay: 11, DumpedAheadOfPlan: 12,
+  };
+  const domainIdx = DOMAIN_NAME_TO_INDEX[domain];
+  if (domainIdx === undefined) return null;
+
+  const values: number[] = [];
+  for (const [role, dmap] of domainMaps) {
+    const tmap = thicknessMaps.get(role);
+    if (!tmap) continue;
+    for (let i = 0; i < dmap.length; i++) {
+      if (dmap[i] === domainIdx && tmap[i] > 0) {
+        values.push(tmap[i]);
+      }
+    }
+  }
+  if (values.length === 0) return null;
+  values.sort((a, b) => a - b);
+  const sum = values.reduce((s, v) => s + v, 0);
+  const p95Idx = Math.min(Math.floor(values.length * 0.95), values.length - 1);
+  return { min: values[0], max: values[values.length - 1], mean: sum / values.length, p95: values[p95Idx] };
+}
+
 export default function LayerPanel({
   result, visible, onToggle, uploads, surfaceVisible, onToggleSurface,
   domainStyles, surfaceStyles, onDomainStyleChange, onSurfaceStyleChange,
+  thicknessMode, onThicknessModeChange, domainMaps, thicknessMaps,
 }: Props) {
   const [expandedDomain, setExpandedDomain] = useState<string | null>(null);
   const [expandedSurface, setExpandedSurface] = useState<SurfaceRole | null>(null);
+  const [hideBelowEnabled, setHideBelowEnabled] = useState(false);
+  const [hideBelowValue, setHideBelowValue] = useState(0.5);
+  const scaleDebounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const grouped = new Map<string, { color: string; label: string; totalVolume: number; count: number }>();
   for (const d of result.domains) {
@@ -209,10 +255,137 @@ export default function LayerPanel({
                 </button>
               </div>
               {isExpanded && isVisible && (
-                <StyleControls
-                  style={style}
-                  onChange={(s) => onDomainStyleChange(domain, s)}
-                />
+                <>
+                  <StyleControls
+                    style={style}
+                    onChange={(s) => onDomainStyleChange(domain, s)}
+                  />
+                  {thicknessMaps.size > 0 && (() => {
+                    const stats = computeDomainThicknessStats(domain, domainMaps, thicknessMaps);
+                    if (!stats) return null;
+                    const isActive = thicknessMode?.domain === domain;
+                    return (
+                      <div className="mt-2 pl-5 space-y-1.5">
+                        <label className="flex items-center gap-1.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={isActive}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                onThicknessModeChange({
+                                  domain,
+                                  scaleMin: 0,
+                                  scaleMax: Math.ceil(stats.p95 * 10) / 10,
+                                  hideBelow: null,
+                                });
+                              } else {
+                                onThicknessModeChange(null);
+                                setHideBelowEnabled(false);
+                              }
+                            }}
+                            className="h-3 w-3 rounded border-slate-600 bg-slate-800 accent-indigo-500"
+                          />
+                          <span className="text-[10px] text-slate-300">Colour by Thickness</span>
+                        </label>
+
+                        {isActive && (
+                          <>
+                            <div className="flex items-center gap-1 text-[10px]">
+                              <span className="text-slate-500 w-9">Scale:</span>
+                              <input
+                                type="number"
+                                step="0.1"
+                                value={thicknessMode!.scaleMin}
+                                onChange={(e) => {
+                                  const v = parseFloat(e.target.value) || 0;
+                                  clearTimeout(scaleDebounceRef.current);
+                                  scaleDebounceRef.current = setTimeout(() => {
+                                    onThicknessModeChange({ ...thicknessMode!, scaleMin: v });
+                                  }, 100);
+                                }}
+                                className="w-12 rounded border border-slate-600 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-200 outline-none focus:border-indigo-500"
+                              />
+                              <span className="text-slate-500">&ndash;</span>
+                              <input
+                                type="number"
+                                step="0.1"
+                                value={thicknessMode!.scaleMax}
+                                onChange={(e) => {
+                                  const v = parseFloat(e.target.value) || 1;
+                                  clearTimeout(scaleDebounceRef.current);
+                                  scaleDebounceRef.current = setTimeout(() => {
+                                    onThicknessModeChange({ ...thicknessMode!, scaleMax: v });
+                                  }, 100);
+                                }}
+                                className="w-12 rounded border border-slate-600 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-200 outline-none focus:border-indigo-500"
+                              />
+                              <span className="text-slate-500">m</span>
+                              <button
+                                type="button"
+                                onClick={() => onThicknessModeChange({
+                                  ...thicknessMode!,
+                                  scaleMin: 0,
+                                  scaleMax: Math.ceil(stats.p95 * 10) / 10,
+                                })}
+                                className="rounded bg-slate-700/50 px-1.5 py-0.5 text-[9px] text-slate-400 hover:text-slate-200"
+                              >
+                                Auto
+                              </button>
+                            </div>
+                            <div className="flex gap-0.5">
+                              {[1, 5, 10, 20].map((v) => (
+                                <button
+                                  key={v}
+                                  type="button"
+                                  onClick={() => onThicknessModeChange({ ...thicknessMode!, scaleMin: 0, scaleMax: v })}
+                                  className={`rounded px-1.5 py-0.5 text-[9px] transition-colors ${
+                                    thicknessMode!.scaleMin === 0 && thicknessMode!.scaleMax === v
+                                      ? 'bg-indigo-500/30 text-indigo-300'
+                                      : 'bg-slate-700/50 text-slate-500 hover:text-slate-300'
+                                  }`}
+                                >
+                                  0–{v}m
+                                </button>
+                              ))}
+                            </div>
+                            <label className="flex items-center gap-1.5 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={hideBelowEnabled}
+                                onChange={(e) => {
+                                  setHideBelowEnabled(e.target.checked);
+                                  onThicknessModeChange({
+                                    ...thicknessMode!,
+                                    hideBelow: e.target.checked ? hideBelowValue : null,
+                                  });
+                                }}
+                                className="h-3 w-3 rounded border-slate-600 bg-slate-800 accent-indigo-500"
+                              />
+                              <span className="text-[10px] text-slate-500">Hide below:</span>
+                              <input
+                                type="number"
+                                step="0.1"
+                                value={hideBelowValue}
+                                onChange={(e) => {
+                                  const v = parseFloat(e.target.value) || 0;
+                                  setHideBelowValue(v);
+                                  if (hideBelowEnabled) {
+                                    onThicknessModeChange({ ...thicknessMode!, hideBelow: v });
+                                  }
+                                }}
+                                className="w-12 rounded border border-slate-600 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-200 outline-none focus:border-indigo-500"
+                              />
+                              <span className="text-[10px] text-slate-500">m</span>
+                            </label>
+                            <div className="text-[9px] text-slate-500">
+                              Min {stats.min.toFixed(1)}m | Max {stats.max.toFixed(1)}m | Mean {stats.mean.toFixed(1)}m
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </>
               )}
             </div>
           );

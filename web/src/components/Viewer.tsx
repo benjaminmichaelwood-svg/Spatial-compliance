@@ -15,6 +15,39 @@ import type {
 import { SURFACE_ROLES } from '../types';
 import type { FlatDomainSolid } from '../workers/engineClient';
 import PerformanceOverlay from './PerformanceOverlay';
+import ThicknessLegend, { RAMP } from './ThicknessLegend';
+
+interface ThicknessMode {
+  domain: string;
+  scaleMin: number;
+  scaleMax: number;
+  hideBelow: number | null;
+}
+
+const DOMAIN_NAME_TO_INDEX: Record<string, number> = {
+  PlannedAndMined: 1, PlannedNotMined: 2, MinedNotPlanned: 3,
+  MinedBeforeStart: 4, PrescheduleDelay: 5, AheadOfPlan: 6,
+  PlannedAndDumped: 7, PlannedNotDumped: 8, DumpedNotPlanned: 9,
+  DumpedBeforeStart: 10, DumpPrescheduleDelay: 11, DumpedAheadOfPlan: 12,
+};
+
+function sampleRamp(t: number): [number, number, number] {
+  const clamped = Math.max(0, Math.min(1, t));
+  for (let i = 0; i < RAMP.length - 1; i++) {
+    if (clamped >= RAMP[i].t && clamped <= RAMP[i + 1].t) {
+      const seg = (clamped - RAMP[i].t) / (RAMP[i + 1].t - RAMP[i].t);
+      const c0 = new THREE.Color(RAMP[i].color);
+      const c1 = new THREE.Color(RAMP[i + 1].color);
+      return [
+        c0.r + (c1.r - c0.r) * seg,
+        c0.g + (c1.g - c0.g) * seg,
+        c0.b + (c1.b - c0.b) * seg,
+      ];
+    }
+  }
+  const last = new THREE.Color(RAMP[RAMP.length - 1].color);
+  return [last.r, last.g, last.b];
+}
 
 (THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
 (THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
@@ -42,6 +75,7 @@ export interface TooltipInfo {
   blockName?: string;
   surfaceFileName?: string;
   surfaceRoleLabel?: string;
+  thickness?: number;
 }
 
 export interface SelectionInfo {
@@ -118,10 +152,12 @@ interface SurfaceMeshProps {
   onHover: (info: TooltipInfo | null) => void;
   onSelect: (id: string, info: SelectionInfo) => void;
   domainMap?: Uint8Array;
+  thicknessMap?: Float32Array;
+  thicknessMode?: ThicknessMode | null;
   domainVisible?: Set<string>;
 }
 
-function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, isDark, domainMap, domainVisible }: SurfaceMeshProps) {
+function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, isDark, domainMap, domainVisible, thicknessMap, thicknessMode }: SurfaceMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const edgesRef = useRef<THREE.LineSegments>(null);
   const matRef = useRef<THREE.MeshPhongMaterial>(null);
@@ -154,24 +190,47 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
     const arr = colorAttr.array as Float32Array;
     const defaultColor = new THREE.Color(style.color);
 
+    const activeThickness = thicknessMode && thicknessMap;
+    const targetDomainIdx = activeThickness ? DOMAIN_NAME_TO_INDEX[thicknessMode!.domain] : undefined;
+
     for (let ti = 0; ti < domainMap.length; ti++) {
       const idx = domainMap[ti];
       let r: number, g: number, b: number;
-      if (idx > 0 && idx < DOMAIN_INDEX_MAP.length && (!domainVisible || domainVisible.has(DOMAIN_INDEX_MAP[idx].domain))) {
+      let alpha = 1.0;
+
+      if (activeThickness && targetDomainIdx !== undefined) {
+        if (idx === targetDomainIdx) {
+          const thick = thicknessMap![ti] || 0;
+          if (thicknessMode!.hideBelow !== null && thick < thicknessMode!.hideBelow) {
+            alpha = 0;
+            r = 0; g = 0; b = 0;
+          } else {
+            const range = thicknessMode!.scaleMax - thicknessMode!.scaleMin;
+            const t = range > 0 ? (thick - thicknessMode!.scaleMin) / range : 0;
+            [r, g, b] = sampleRamp(t);
+          }
+        } else {
+          r = defaultColor.r * 0.3;
+          g = defaultColor.g * 0.3;
+          b = defaultColor.b * 0.3;
+          alpha = 0.05;
+        }
+      } else if (idx > 0 && idx < DOMAIN_INDEX_MAP.length && (!domainVisible || domainVisible.has(DOMAIN_INDEX_MAP[idx].domain))) {
         const c = DOMAIN_INDEX_MAP[idx].color;
         r = c.r; g = c.g; b = c.b;
       } else {
         r = defaultColor.r; g = defaultColor.g; b = defaultColor.b;
       }
+
       const vi = ti * 3;
       for (let v = 0; v < 3; v++) {
-        arr[(vi + v) * 3] = r;
-        arr[(vi + v) * 3 + 1] = g;
-        arr[(vi + v) * 3 + 2] = b;
+        arr[(vi + v) * 3] = alpha > 0 ? r : 0;
+        arr[(vi + v) * 3 + 1] = alpha > 0 ? g : 0;
+        arr[(vi + v) * 3 + 2] = alpha > 0 ? b : 0;
       }
     }
     colorAttr.needsUpdate = true;
-  }, [paintedGeo, domainMap, domainVisible, style.color]);
+  }, [paintedGeo, domainMap, domainVisible, style.color, thicknessMap, thicknessMode]);
 
   const isPainted = !!paintedGeo;
   const activeGeo = paintedGeo ?? geometry;
@@ -221,16 +280,28 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
         frustumCulled
         onPointerOver={(e) => {
           e.stopPropagation();
+          let thick: number | undefined;
+          if (thicknessMode && thicknessMap && e.faceIndex != null) {
+            const fi = isPainted ? e.faceIndex : e.faceIndex;
+            thick = thicknessMap[fi];
+          }
           onHover({
             x: e.clientX, y: e.clientY, domain: roleLabel, volume: 0,
             surfaceFileName: upload.fileName, surfaceRoleLabel: roleLabel,
+            thickness: thick,
           });
         }}
         onPointerMove={(e) => {
           e.stopPropagation();
+          let thick: number | undefined;
+          if (thicknessMode && thicknessMap && e.faceIndex != null) {
+            const fi = isPainted ? e.faceIndex : e.faceIndex;
+            thick = thicknessMap[fi];
+          }
           onHover({
             x: e.clientX, y: e.clientY, domain: roleLabel, volume: 0,
             surfaceFileName: upload.fileName, surfaceRoleLabel: roleLabel,
+            thickness: thick,
           });
         }}
         onPointerOut={() => onHover(null)}
@@ -1000,7 +1071,9 @@ export interface ViewerProps {
   savedMeasurements: SavedMeasurement[];
   showPerf: boolean;
   domainMaps: Map<SurfaceRole, Uint8Array>;
+  thicknessMaps: Map<SurfaceRole, Float32Array>;
   displayMode: 'painting' | 'solids';
+  thicknessMode: ThicknessMode | null;
 }
 
 const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
@@ -1008,7 +1081,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   uploads, surfaceVisible, isDrawingSection, sectionLine, onSectionLineChange,
   onSectionDrawComplete, background, domainStyles, surfaceStyles, selectedId,
   onSelect, measureTool, measurePoints, onAddMeasurePoint, savedMeasurements, showPerf,
-  domainMaps, displayMode,
+  domainMaps, thicknessMaps, displayMode, thicknessMode,
 }, ref) {
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null);
   const [isDraggingEndpoint, setIsDraggingEndpoint] = useState(false);
@@ -1180,6 +1253,8 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
               onSelect={handleMeshClick}
               domainMap={map}
               domainVisible={visible}
+              thicknessMap={isPaintMode ? thicknessMaps.get(role) : undefined}
+              thicknessMode={isPaintMode ? thicknessMode : null}
             />
           );
         })}
@@ -1237,6 +1312,18 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
         <KeyboardShortcuts controlsRef={controlsRef} flatDomains={flatDomains} uploads={uploads} />
       </Canvas>
 
+      {/* Thickness Legend */}
+      {thicknessMode && (
+        <ThicknessLegend
+          domainLabel={
+            DOMAIN_INDEX_MAP[DOMAIN_NAME_TO_INDEX[thicknessMode.domain] ?? 0]?.label ?? thicknessMode.domain
+          }
+          scaleMin={thicknessMode.scaleMin}
+          scaleMax={thicknessMode.scaleMax}
+          isDark={isDark}
+        />
+      )}
+
       {/* Tooltip */}
       {tooltip && (
         <div
@@ -1244,9 +1331,14 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           style={{ left: tooltip.x + 12, top: tooltip.y - 40 }}
         >
           {tooltip.surfaceFileName ? (
-            <div className="font-medium">
-              {tooltip.surfaceFileName} &mdash; {tooltip.surfaceRoleLabel}
-            </div>
+            <>
+              <div className="font-medium">
+                {tooltip.surfaceFileName} &mdash; {tooltip.surfaceRoleLabel}
+              </div>
+              {tooltip.thickness !== undefined && tooltip.thickness > 0 && (
+                <div className="text-cyan-300">Thickness: {tooltip.thickness.toFixed(1)}m</div>
+              )}
+            </>
           ) : (
             <>
               <div className="font-semibold">{tooltip.domain}</div>

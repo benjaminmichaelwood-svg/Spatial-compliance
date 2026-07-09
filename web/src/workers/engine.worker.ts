@@ -207,12 +207,19 @@ function handleRunConformance(msg: RunMsg) {
     }
 
     const domainMaps: Record<string, Uint8Array> = {};
+    const thicknessMaps: Record<string, Float32Array> = {};
     const mapRoles = ['production_start', 'production_end', 'schedule_start', 'schedule_end', 'schedule_future'];
     for (const role of mapRoles) {
       const map: Uint8Array | undefined = result.domainMaps?.[role];
       if (map && map.length > 0) {
         const copy = new Uint8Array(map);
         domainMaps[role] = copy;
+        transfers.push(copy.buffer);
+      }
+      const thick: Float32Array | undefined = result.thicknessMaps?.[role];
+      if (thick && thick.length > 0) {
+        const copy = new Float32Array(thick);
+        thicknessMaps[role] = copy;
         transfers.push(copy.buffer);
       }
     }
@@ -226,6 +233,7 @@ function handleRunConformance(msg: RunMsg) {
           summary: result.summary,
           flatDomains,
           domainMaps,
+          thicknessMaps,
         },
       },
       { transfer: transfers } as any,

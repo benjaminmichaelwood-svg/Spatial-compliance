@@ -343,13 +343,19 @@ pub fn run_conformance_flat(
 
     let paint_maps = classify_surface_domains(&input);
     let paint_obj = js_sys::Object::new();
+    let thickness_obj = js_sys::Object::new();
     let roles = ["production_start", "production_end", "schedule_start", "schedule_end", "schedule_future"];
-    for (si, domain_map) in &paint_maps {
+    for (si, domain_map, thickness_map) in &paint_maps {
         let arr = js_sys::Uint8Array::new_with_length(domain_map.len() as u32);
         arr.copy_from(domain_map);
         js_sys::Reflect::set(&paint_obj, &roles[*si].into(), &arr)?;
+
+        let thick_arr = js_sys::Float32Array::new_with_length(thickness_map.len() as u32);
+        thick_arr.copy_from(thickness_map);
+        js_sys::Reflect::set(&thickness_obj, &roles[*si].into(), &thick_arr)?;
     }
     js_sys::Reflect::set(&obj, &"domainMaps".into(), &paint_obj)?;
+    js_sys::Reflect::set(&obj, &"thicknessMaps".into(), &thickness_obj)?;
 
     Ok(obj.into())
 }
