@@ -13,29 +13,51 @@ export default function BoundaryPanel({ boundaries, onChange, onStartDraw, isDra
   const fileRef = useRef<HTMLInputElement>(null);
   const [editIdx, setEditIdx] = useState<number | null>(null);
   const [editName, setEditName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   const handleFile = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
 
+      setError(null);
+      setLoading(true);
+      console.log('[BoundaryPanel] File selected:', file.name, 'size:', file.size);
+
       try {
         const ext = file.name.split('.').pop()?.toLowerCase();
         if (ext === 'dxf') {
+          console.log('[BoundaryPanel] Parsing DXF file...');
           const text = await file.text();
-          const regions = parseDxf(text);
-          onChange([...boundaries, ...regions]);
+          console.log('[BoundaryPanel] DXF text length:', text.length);
+          const regions = await parseDxf(text);
+          console.log('[BoundaryPanel] DXF parsed, regions:', regions.length);
+          if (regions.length === 0) {
+            setError('No polygons found in DXF file.');
+          } else {
+            onChange([...boundaries, ...regions]);
+          }
         } else {
+          console.log('[BoundaryPanel] Parsing surface file for boundary extraction...');
           const buf = new Uint8Array(await file.arrayBuffer());
           const surfaces = parseSurfaces(buf);
+          console.log('[BoundaryPanel] Surfaces parsed:', surfaces.length);
           if (surfaces.length > 0) {
-            const region = extractBoundaryFromSurfaceJson(surfaces[0]);
+            const region = await extractBoundaryFromSurfaceJson(surfaces[0]);
             region.name = file.name.replace(/\.[^.]+$/, '');
+            console.log('[BoundaryPanel] Boundary extracted:', region.name, 'points:', region.polygon.length);
             onChange([...boundaries, region]);
+          } else {
+            setError('No surfaces found in file.');
           }
         }
-      } catch (err) {
-        console.error('Failed to parse boundary file:', err);
+      } catch (err: any) {
+        const msg = err?.message || String(err);
+        console.error('[BoundaryPanel] Failed to parse boundary file:', msg);
+        setError(msg);
+      } finally {
+        setLoading(false);
       }
 
       if (fileRef.current) fileRef.current.value = '';
@@ -89,6 +111,16 @@ export default function BoundaryPanel({ boundaries, onChange, onStartDraw, isDra
         onChange={handleFile}
         className="hidden"
       />
+
+      {loading && (
+        <p className="text-[11px] text-indigo-400 mb-1">Loading boundary file…</p>
+      )}
+
+      {error && (
+        <div className="mb-1 rounded bg-red-900/40 px-2 py-1.5 text-[11px] text-red-300">
+          {error}
+        </div>
+      )}
 
       {boundaries.length === 0 ? (
         <p className="text-[11px] text-slate-500 italic">No boundaries defined</p>

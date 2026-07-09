@@ -2,14 +2,24 @@ import type { BoundaryRegion, ConformanceResult, Mode, TriSurface } from './type
 
 let initialized = false;
 let wasmModule: any = null;
+let initPromise: Promise<void> | null = null;
 
 export async function initWasm(): Promise<void> {
   if (initialized) return;
-  const mod = await import('spatial-engine');
-  const base = import.meta.env.BASE_URL ?? '/';
-  await mod.default({ module_or_path: `${base}spatial_engine_bg.wasm` });
-  wasmModule = mod;
-  initialized = true;
+  if (initPromise) return initPromise;
+  initPromise = (async () => {
+    const mod = await import('spatial-engine');
+    const base = import.meta.env.BASE_URL ?? '/';
+    await mod.default({ module_or_path: `${base}spatial_engine_bg.wasm` });
+    wasmModule = mod;
+    initialized = true;
+  })();
+  return initPromise;
+}
+
+async function ensureWasm(): Promise<void> {
+  if (initialized) return;
+  await initWasm();
 }
 
 export function parseSurfaces(data: Uint8Array): TriSurface[] {
@@ -58,15 +68,18 @@ export function runConformanceWithBoundaries(
   ) as ConformanceResult;
 }
 
-export function parseDxf(content: string): BoundaryRegion[] {
+export async function parseDxf(content: string): Promise<BoundaryRegion[]> {
+  await ensureWasm();
   return wasmModule.parse_dxf(content) as BoundaryRegion[];
 }
 
-export function extractBoundaryFromSurface(data: Uint8Array): BoundaryRegion {
+export async function extractBoundaryFromSurface(data: Uint8Array): Promise<BoundaryRegion> {
+  await ensureWasm();
   return wasmModule.extract_boundary_from_surface(data) as BoundaryRegion;
 }
 
-export function extractBoundaryFromSurfaceJson(surface: TriSurface): BoundaryRegion {
+export async function extractBoundaryFromSurfaceJson(surface: TriSurface): Promise<BoundaryRegion> {
+  await ensureWasm();
   return wasmModule.extract_boundary_from_surface_json(
     JSON.stringify(surface),
   ) as BoundaryRegion;
