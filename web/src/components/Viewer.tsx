@@ -1103,7 +1103,6 @@ export interface ViewerProps {
   showPerf: boolean;
   domainMaps: Map<SurfaceRole, Uint8Array>;
   thicknessMaps: Map<SurfaceRole, Float32Array>;
-  displayMode: 'painting' | 'solids';
   thicknessMode: ThicknessMode | null;
 }
 
@@ -1112,7 +1111,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   uploads, surfaceVisible, isDrawingSection, sectionLine, onSectionLineChange,
   onSectionDrawComplete, background, domainStyles, surfaceStyles, selectedId,
   onSelect, measureTool, measurePoints, onAddMeasurePoint, savedMeasurements, showPerf,
-  domainMaps, thicknessMaps, displayMode, thicknessMode,
+  domainMaps, thicknessMaps, thicknessMode,
 }, ref) {
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null);
   const [isDraggingEndpoint, setIsDraggingEndpoint] = useState(false);
@@ -1244,7 +1243,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           args={[isDark ? '#334155' : '#d4e5f7', isDark ? '#0f172a' : '#f5f0e6', isDark ? 0.2 : 0.25]}
         />
 
-        {displayMode === 'solids' && [...domainGroups.entries()].map(([domain, solids]) => {
+        {[...domainGroups.entries()].map(([domain, solids]) => {
           const id = `domain-${domain}`;
           const defaultStyle: ObjectStyle = { color: solids[0].color, opacity: 0.85, wireframe: false };
           const style = domainStyles.get(domain) ?? defaultStyle;
@@ -1265,17 +1264,15 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
         })}
 
         {[...uploads.entries()].map(([role, upload]) => {
-          const isPaintMode = displayMode === 'painting' && domainMaps.size > 0;
-          if (!isPaintMode && !surfaceVisible.has(role)) return null;
-          if (isPaintMode && !surfaceVisible.has(role) && !domainMaps.has(role)) return null;
+          if (!surfaceVisible.has(role)) return null;
           const id = `surface-${role}`;
+          const hasDomainMap = domainMaps.has(role);
           const defaultStyle: ObjectStyle = {
             color: DEFAULT_SURFACE_COLORS[role],
-            opacity: isPaintMode ? 0.92 : 0.3,
+            opacity: hasDomainMap ? 0.92 : 0.3,
             wireframe: false,
           };
           const style = surfaceStyles.get(role) ?? defaultStyle;
-          const map = isPaintMode ? domainMaps.get(role) : undefined;
           return (
             <SurfaceMesh
               key={role}
@@ -1286,10 +1283,10 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
               isDark={isDark}
               onHover={handleHover}
               onSelect={handleMeshClick}
-              domainMap={map}
+              domainMap={domainMaps.get(role)}
               domainVisible={visible}
-              thicknessMap={isPaintMode ? thicknessMaps.get(role) : undefined}
-              thicknessMode={isPaintMode ? thicknessMode : null}
+              thicknessMap={thicknessMaps.get(role)}
+              thicknessMode={thicknessMode}
             />
           );
         })}

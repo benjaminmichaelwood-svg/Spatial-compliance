@@ -404,6 +404,54 @@ fn classify_cell_schedule_only(ss: f64, se: f64, mode: Mode) -> Vec<Interval> {
 }
 
 // ---------------------------------------------------------------------------
+// Per-vertex bound helpers — same domain formulas applied at each vertex
+// ---------------------------------------------------------------------------
+
+fn per_vertex_bounds_dig(domain: Domain, ps: f64, pe: f64, ss: f64, se: f64, sf: Option<f64>) -> (f64, f64) {
+    match domain {
+        Domain::PrescheduleDelay => (ps, ss),
+        Domain::MinedBeforeStart => (ss, ps),
+        Domain::PlannedAndMined => (ps.min(ss), pe.max(se)),
+        Domain::PlannedNotMined => (pe.min(ps.min(ss)), se),
+        Domain::MinedNotPlanned => {
+            match sf {
+                Some(sf_val) if sf_val < se => (sf_val, pe),
+                _ => (se, pe),
+            }
+        }
+        Domain::AheadOfPlan => {
+            match sf {
+                Some(sf_val) if sf_val < se => (se, pe.max(sf_val)),
+                _ => (se, pe),
+            }
+        }
+        _ => (0.0, 0.0),
+    }
+}
+
+fn per_vertex_bounds_dump(domain: Domain, ps: f64, pe: f64, ss: f64, se: f64, sf: Option<f64>) -> (f64, f64) {
+    match domain {
+        Domain::DumpedBeforeStart => (ps, ss),
+        Domain::DumpPrescheduleDelay => (ss, ps),
+        Domain::PlannedAndDumped => (pe.min(se), ps.max(ss)),
+        Domain::PlannedNotDumped => (se, pe.max(ps.max(ss))),
+        Domain::DumpedNotPlanned => {
+            match sf {
+                Some(sf_val) if sf_val > se => (pe, sf_val),
+                _ => (pe, se),
+            }
+        }
+        Domain::DumpedAheadOfPlan => {
+            match sf {
+                Some(sf_val) if sf_val > se => (pe.min(sf_val), se),
+                _ => (pe, se),
+            }
+        }
+        _ => (0.0, 0.0),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main classifier entry point — mesh-based iteration via BVH
 // ---------------------------------------------------------------------------
 
@@ -499,18 +547,97 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
                 continue;
             }
 
+            let verts = [tri.v0, tri.v1, tri.v2];
+            let per_vertex_zs: [[Option<f64>; 5]; 3] = verts.map(|v| {
+                [
+                    if si == 0 { Some(v.z) } else { bvhs[0].as_ref().and_then(|b| b.interpolate_z(v.x, v.y)) },
+                    if si == 1 { Some(v.z) } else { bvhs[1].as_ref().and_then(|b| b.interpolate_z(v.x, v.y)) },
+                    if si == 2 { Some(v.z) } else { bvhs[2].as_ref().and_then(|b| b.interpolate_z(v.x, v.y)) },
+                    if si == 3 { Some(v.z) } else { bvhs[3].as_ref().and_then(|b| b.interpolate_z(v.x, v.y)) },
+                    if si == 4 { Some(v.z) } else { bvhs[4].as_ref().and_then(|b| b.interpolate_z(v.x, v.y)) },
+                ]
+            });
+
             for iv in &intervals {
                 let key = (iv.domain, block_idx);
-                let top = [
-                    Vec3::new(tri.v0.x, tri.v0.y, iv.upper),
-                    Vec3::new(tri.v1.x, tri.v1.y, iv.upper),
-                    Vec3::new(tri.v2.x, tri.v2.y, iv.upper),
-                ];
-                let bot_z = [iv.lower, iv.lower, iv.lower];
-                builders
-                    .entry(key)
-                    .or_insert_with(MeshBuilder::new)
-                    .add_tri_prism(top, bot_z);
+                let mut top = [Vec3::new(0.0, 0.0, 0.0); 3];
+                let mut bot_z = [0.0; 3];
+                let mut valid = true;
+
+                for vi in 0..3 {
+                    let v = verts[vi];
+                    let vzs = per_vertex_zs[vi];
+
+                    let has_v_prod = vzs[0].is_some() && vzs[1].is_some();
+                    let has_v_sched = vzs[2].is_some() && vzs[3].is_some();
+
+                    if has_v_prod && has_v_sched {
+                        let (upper, lower) = match input.mode {
+                            Mode::Dig => per_vertex_bounds_dig(
+                                iv.domain, vzs[0].unwrap(), vzs[1].unwrap(),
+                                vzs[2].unwrap(), vzs[3].unwrap(), vzs[4],
+                            ),
+                            Mode::Dump => per_vertex_bounds_dump(
+                                iv.domain, vzs[0].unwrap(), vzs[1].unwrap(),
+                                vzs[2].unwrap(), vzs[3].unwrap(), vzs[4],
+                            ),
+                        };
+                        if upper > lower + 1e-9 {
+                            top[vi] = Vec3::new(v.x, v.y, upper);
+                            bot_z[vi] = lower;
+                        } else {
+                            top[vi] = Vec3::new(v.x, v.y, iv.upper);
+                            bot_z[vi] = iv.lower;
+                        }
+                    } else if has_v_prod {
+                        let (vps, vpe) = (vzs[0].unwrap(), vzs[1].unwrap());
+                        match input.mode {
+                            Mode::Dig if vps > vpe + 1e-9 => {
+                                top[vi] = Vec3::new(v.x, v.y, vps);
+                                bot_z[vi] = vpe;
+                            }
+                            Mode::Dump if vpe > vps + 1e-9 => {
+                                top[vi] = Vec3::new(v.x, v.y, vpe);
+                                bot_z[vi] = vps;
+                            }
+                            _ => {
+                                top[vi] = Vec3::new(v.x, v.y, iv.upper);
+                                bot_z[vi] = iv.lower;
+                            }
+                        }
+                    } else if has_v_sched {
+                        let (vss, vse) = (vzs[2].unwrap(), vzs[3].unwrap());
+                        match input.mode {
+                            Mode::Dig if vss > vse + 1e-9 => {
+                                top[vi] = Vec3::new(v.x, v.y, vss);
+                                bot_z[vi] = vse;
+                            }
+                            Mode::Dump if vse > vss + 1e-9 => {
+                                top[vi] = Vec3::new(v.x, v.y, vse);
+                                bot_z[vi] = vss;
+                            }
+                            _ => {
+                                top[vi] = Vec3::new(v.x, v.y, iv.upper);
+                                bot_z[vi] = iv.lower;
+                            }
+                        }
+                    } else {
+                        valid = false;
+                        break;
+                    }
+                }
+
+                if !valid {
+                    let top_fallback = [
+                        Vec3::new(verts[0].x, verts[0].y, iv.upper),
+                        Vec3::new(verts[1].x, verts[1].y, iv.upper),
+                        Vec3::new(verts[2].x, verts[2].y, iv.upper),
+                    ];
+                    let bot_fallback = [iv.lower, iv.lower, iv.lower];
+                    builders.entry(key).or_insert_with(MeshBuilder::new).add_tri_prism(top_fallback, bot_fallback);
+                } else {
+                    builders.entry(key).or_insert_with(MeshBuilder::new).add_tri_prism(top, bot_z);
+                }
             }
         }
 
@@ -654,86 +781,72 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
 // ---------------------------------------------------------------------------
 
 pub fn classify_surface_domains(input: &ConformanceInput) -> Vec<(usize, Vec<u8>, Vec<f32>)> {
-    let opt_surfaces: [Option<&TriSurface>; 5] = [
-        input.production_start,
-        input.production_end,
-        input.schedule_start,
-        input.schedule_end,
-        input.schedule_future,
-    ];
+    let ref_surface = match input.production_end {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
 
     let bvhs: [Option<SurfaceBvh>; 5] = [
-        opt_surfaces[0].map(SurfaceBvh::build),
-        opt_surfaces[1].map(SurfaceBvh::build),
-        opt_surfaces[2].map(SurfaceBvh::build),
-        opt_surfaces[3].map(SurfaceBvh::build),
-        opt_surfaces[4].map(SurfaceBvh::build),
+        input.production_start.map(SurfaceBvh::build),
+        None, // production_end IS the ref surface — use its own Z
+        input.schedule_start.map(SurfaceBvh::build),
+        input.schedule_end.map(SurfaceBvh::build),
+        input.schedule_future.map(SurfaceBvh::build),
     ];
 
-    let mut results = Vec::new();
+    let num_tris = ref_surface.num_triangles();
+    let mut domain_map = vec![0u8; num_tris];
+    let mut thickness_map = vec![0.0f32; num_tris];
 
-    for si in 0..5 {
-        let surface = match opt_surfaces[si] {
-            Some(s) => s,
-            None => continue,
+    for ti in 0..num_tris {
+        let tri = ref_surface.triangle(ti);
+        let cx = (tri.v0.x + tri.v1.x + tri.v2.x) / 3.0;
+        let cy = (tri.v0.y + tri.v1.y + tri.v2.y) / 3.0;
+        let cz = (tri.v0.z + tri.v1.z + tri.v2.z) / 3.0;
+
+        let zs: [Option<f64>; 5] = [
+            bvhs[0].as_ref().and_then(|b| b.interpolate_z(cx, cy)),
+            Some(cz),
+            bvhs[2].as_ref().and_then(|b| b.interpolate_z(cx, cy)),
+            bvhs[3].as_ref().and_then(|b| b.interpolate_z(cx, cy)),
+            bvhs[4].as_ref().and_then(|b| b.interpolate_z(cx, cy)),
+        ];
+
+        let has_production = zs[0].is_some() && zs[1].is_some();
+        let has_schedule = zs[2].is_some() && zs[3].is_some();
+
+        let intervals = if has_production && has_schedule {
+            let (ps, pe) = (zs[0].unwrap(), zs[1].unwrap());
+            let (ss, se) = (zs[2].unwrap(), zs[3].unwrap());
+            let sf = zs[4];
+            match input.mode {
+                Mode::Dig => classify_cell_dig(ps, pe, ss, se, sf),
+                Mode::Dump => classify_cell_dump(ps, pe, ss, se, sf),
+            }
+        } else if has_production {
+            let (ps, pe) = (zs[0].unwrap(), zs[1].unwrap());
+            classify_cell_no_schedule(ps, pe, input.mode)
+        } else if has_schedule {
+            let (ss, se) = (zs[2].unwrap(), zs[3].unwrap());
+            classify_cell_schedule_only(ss, se, input.mode)
+        } else {
+            continue;
         };
 
-        let num_tris = surface.num_triangles();
-        let mut domain_map = vec![0u8; num_tris];
-        let mut thickness_map = vec![0.0f32; num_tris];
-
-        for ti in 0..num_tris {
-            let tri = surface.triangle(ti);
-            let cx = (tri.v0.x + tri.v1.x + tri.v2.x) / 3.0;
-            let cy = (tri.v0.y + tri.v1.y + tri.v2.y) / 3.0;
-            let cz = (tri.v0.z + tri.v1.z + tri.v2.z) / 3.0;
-
-            let zs: [Option<f64>; 5] = [
-                if si == 0 { Some(cz) } else { bvhs[0].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
-                if si == 1 { Some(cz) } else { bvhs[1].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
-                if si == 2 { Some(cz) } else { bvhs[2].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
-                if si == 3 { Some(cz) } else { bvhs[3].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
-                if si == 4 { Some(cz) } else { bvhs[4].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
-            ];
-
-            let has_production = zs[0].is_some() && zs[1].is_some();
-            let has_schedule = zs[2].is_some() && zs[3].is_some();
-
-            let intervals = if has_production && has_schedule {
-                let (ps, pe) = (zs[0].unwrap(), zs[1].unwrap());
-                let (ss, se) = (zs[2].unwrap(), zs[3].unwrap());
-                let sf = zs[4];
-                match input.mode {
-                    Mode::Dig => classify_cell_dig(ps, pe, ss, se, sf),
-                    Mode::Dump => classify_cell_dump(ps, pe, ss, se, sf),
-                }
-            } else if has_production {
-                let (ps, pe) = (zs[0].unwrap(), zs[1].unwrap());
-                classify_cell_no_schedule(ps, pe, input.mode)
-            } else if has_schedule {
-                let (ss, se) = (zs[2].unwrap(), zs[3].unwrap());
-                classify_cell_schedule_only(ss, se, input.mode)
-            } else {
-                continue;
-            };
-
-            if let Some(best) = intervals.iter().max_by(|a, b| {
-                let ta = a.upper - a.lower;
-                let tb = b.upper - b.lower;
-                ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
-            }) {
-                let thick = (best.upper - best.lower).abs();
-                if thick > 1e-9 {
-                    domain_map[ti] = best.domain.index();
-                    thickness_map[ti] = thick as f32;
-                }
+        if let Some(best) = intervals.iter().max_by(|a, b| {
+            let ta = a.upper - a.lower;
+            let tb = b.upper - b.lower;
+            ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            let thick = (best.upper - best.lower).abs();
+            if thick > 1e-9 {
+                domain_map[ti] = best.domain.index();
+                thickness_map[ti] = thick as f32;
             }
         }
-
-        results.push((si, domain_map, thickness_map));
     }
 
-    results
+    vec![(1, domain_map, thickness_map)]
 }
 
 // ---------------------------------------------------------------------------
