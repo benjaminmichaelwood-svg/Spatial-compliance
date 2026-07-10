@@ -72,6 +72,39 @@ Fully reverse-engineered and validated (zero delta across 68,259 vertices and 13
 - No browser freezing on any interaction
 - Computation runs in Web Worker with progress bar
 
+## Visual Quality Standard (NON-NEGOTIABLE)
+
+The benchmark for all 3D display output is **Deswik, Vulcan, and Maptek PointStudio**. This tool will be judged by mining engineers who use those packages daily. Output that looks worse than those tools is a failed implementation, even if tests pass.
+
+### Definition of visual failure
+- Flat-topped, stepped, or blocky prism solids ("Minescape blocks") — solids MUST follow terrain contours smoothly via per-vertex Z interpolation
+- Floating disconnected geometry fragments
+- Z-fighting, flickering, or overlapping translucent surfaces obscuring each other
+- Geometry that ignores the user's visibility toggles
+- Colours or gradients that don't match the legend shown
+- Jagged domain boundaries where smooth transitions are expected at this data resolution
+
+### Definition of done for ANY change touching geometry generation or rendering
+"Tests pass" is NOT done. Done means:
+1. `npm run dev`, load test surfaces from `test-data/` (if present), run conformance
+2. Visually inspect the 3D result — screenshot it
+3. Confirm the result matches the Deswik/Vulcan/PointStudio standard
+4. If you cannot run the dev server or inspect visually, you MUST state this explicitly in your completion report: "NOT VISUALLY VERIFIED". Never claim a visual fix is complete without either verifying it or flagging that you could not.
+
+### Standing rules for geometry code
+- Prism/solid construction MUST use per-vertex Z interpolation (BVH lookup per vertex), never flat centroid Z per triangle
+- Domain painting applies to production_end surface ONLY — never paint all input surfaces
+- Rendering uses indexed BufferGeometry + MeshPhongMaterial. NEVER EdgesGeometry, barycentric wireframe shaders, or LOD copies
+- All WASM mesh transfer via flat Float32Array/Uint32Array transferables. NEVER serde/JSON for mesh data
+- Raycasting via three-mesh-bvh only
+- User visibility toggles are ALWAYS respected — no display mode may override them
+- Do not add new display modes/toggles unless explicitly requested by the user
+
+### Visual reference targets
+- Solid surfaces: smooth continuous shells hugging terrain, like a Vulcan triangulation solid
+- Thickness heatmaps: PointStudio compliance-to-design style — gradient painted on surface, vertical colour bar legend, user-controlled scale
+- Lighting: directional + ambient so benches, batters, and slopes read clearly at any zoom
+
 ## CAD Viewer Requirements (Deswik-style)
 - White or black background (user toggle), no grid floor
 - Z-up orientation enforced
