@@ -13,6 +13,10 @@ serde_json = "1"
 js-sys = "0.3"
 serde-wasm-bindgen = "0.6"
 
+[[bin]]
+name = "gen-test-surfaces"
+path = "src/bin/gen_test_surfaces.rs"
+
 [dev-dependencies]
 approx = "0.5"
 
