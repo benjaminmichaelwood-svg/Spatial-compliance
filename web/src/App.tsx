@@ -361,7 +361,7 @@ export default function App() {
 
         setFlatDomains(flatResult.flatDomains);
         setResult(conformanceResult);
-        setVisible(new Set(conformanceResult.domains.map((d) => d.domain)));
+        setVisible(new Set<string>());
 
         if (flatResult.domainMaps) {
           const maps = new Map<SurfaceRole, Uint8Array>();
