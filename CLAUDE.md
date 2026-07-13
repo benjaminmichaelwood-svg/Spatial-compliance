@@ -105,6 +105,9 @@ The benchmark for all 3D display output is **Deswik, Vulcan, and Maptek PointStu
 - Thickness heatmaps: PointStudio compliance-to-design style — gradient painted on surface, vertical colour bar legend, user-controlled scale
 - Lighting: directional + ambient so benches, batters, and slopes read clearly at any zoom
 
+### Automated visual verification
+Run `node scripts/visual-check.mjs` (requires `npm run dev` on localhost:5173 and Playwright installed). It launches headless Chromium with SwiftShader (`--use-angle=swiftshader --enable-unsafe-swiftshader --use-gl=angle`), loads test surfaces, runs conformance, and saves screenshots to `visual-check/` (gitignored). Use `PORT=NNNN` to override the dev server port. In CI environments, set `CHROME_PATH` to the Chromium executable.
+
 ## CAD Viewer Requirements (Deswik-style)
 - White or black background (user toggle), no grid floor
 - Z-up orientation enforced

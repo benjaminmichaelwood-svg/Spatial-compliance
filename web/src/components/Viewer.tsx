@@ -143,6 +143,31 @@ const BG_COLORS: Record<ViewerBackground, string> = {
 const EDGE_COLOR_DARK = 0x444444;
 const EDGE_COLOR_LIGHT = 0x999999;
 
+function computeSmoothNormals(positions: Float32Array): Float32Array {
+  const normals = new Float32Array(positions.length);
+  const acc = new Map<string, [number, number, number]>();
+  const key = (i: number) =>
+    `${Math.round(positions[i * 3] * 1000)},${Math.round(positions[i * 3 + 1] * 1000)},${Math.round(positions[i * 3 + 2] * 1000)}`;
+
+  for (let t = 0; t < positions.length / 9; t++) {
+    const i0 = t * 3, i1 = t * 3 + 1, i2 = t * 3 + 2;
+    const ax = positions[i1 * 3] - positions[i0 * 3], ay = positions[i1 * 3 + 1] - positions[i0 * 3 + 1], az = positions[i1 * 3 + 2] - positions[i0 * 3 + 2];
+    const bx = positions[i2 * 3] - positions[i0 * 3], by = positions[i2 * 3 + 1] - positions[i0 * 3 + 1], bz = positions[i2 * 3 + 2] - positions[i0 * 3 + 2];
+    const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    for (const i of [i0, i1, i2]) {
+      const k = key(i);
+      const e = acc.get(k);
+      if (e) { e[0] += nx; e[1] += ny; e[2] += nz; } else { acc.set(k, [nx, ny, nz]); }
+    }
+  }
+  for (let i = 0; i < positions.length / 3; i++) {
+    const [nx, ny, nz] = acc.get(key(i))!;
+    const len = Math.hypot(nx, ny, nz) || 1;
+    normals[i * 3] = nx / len; normals[i * 3 + 1] = ny / len; normals[i * 3 + 2] = nz / len;
+  }
+  return normals;
+}
+
 interface SurfaceMeshProps {
   upload: UploadedSurface;
   style: ObjectStyle;
@@ -175,7 +200,10 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
   const paintedGeo = useMemo(() => {
     if (!domainMap || domainMap.length === 0) return null;
     const nonIndexed = geometry.toNonIndexed();
-    nonIndexed.computeVertexNormals();
+    const positions = nonIndexed.attributes.position.array as Float32Array;
+    nonIndexed.setAttribute('normal', new THREE.BufferAttribute(
+      computeSmoothNormals(positions), 3,
+    ));
     nonIndexed.computeBoundingSphere();
     const count = nonIndexed.attributes.position.count;
     const colors = new Float32Array(count * 3);
@@ -215,7 +243,7 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
           b = defaultColor.b * 0.3;
           alpha = 0.05;
         }
-      } else if (idx > 0 && idx < DOMAIN_INDEX_MAP.length && (!domainVisible || domainVisible.has(DOMAIN_INDEX_MAP[idx].domain))) {
+      } else if (idx > 0 && idx < DOMAIN_INDEX_MAP.length) {
         const c = DOMAIN_INDEX_MAP[idx].color;
         r = c.r; g = c.g; b = c.b;
       } else {
@@ -230,7 +258,7 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
       }
     }
     colorAttr.needsUpdate = true;
-  }, [paintedGeo, domainMap, domainVisible, style.color, thicknessMap, thicknessMode]);
+  }, [paintedGeo, domainMap, style.color, thicknessMap, thicknessMode]);
 
   const isPainted = !!paintedGeo;
   const activeGeo = paintedGeo ?? geometry;
@@ -323,6 +351,9 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
           side={THREE.DoubleSide}
           flatShading={false}
           shininess={isPainted ? 15 : 10}
+          polygonOffset={isPainted}
+          polygonOffsetFactor={isPainted ? -1 : 0}
+          polygonOffsetUnits={isPainted ? -1 : 0}
         />
       </mesh>
       {edgesGeo && (
@@ -486,7 +517,7 @@ function BatchedDomainGroup({
   );
 }
 
-function AutoFit({ flatDomains, visible }: { flatDomains: FlatDomainSolid[]; visible: Set<string> }) {
+function AutoFit({ flatDomains, visible, uploads }: { flatDomains: FlatDomainSolid[]; visible: Set<string>; uploads: Map<SurfaceRole, UploadedSurface> }) {
   const { camera } = useThree();
   const fitted = useRef(false);
 
@@ -494,9 +525,13 @@ function AutoFit({ flatDomains, visible }: { flatDomains: FlatDomainSolid[]; vis
     if (fitted.current) return;
     const box = new THREE.Box3();
     for (const d of flatDomains) {
-      if (!visible.has(d.domain)) continue;
       for (let i = 0; i < d.vertexCount; i++) {
         box.expandByPoint(new THREE.Vector3(d.positions[i * 3], d.positions[i * 3 + 1], d.positions[i * 3 + 2]));
+      }
+    }
+    for (const [, upload] of uploads) {
+      for (let i = 0; i < upload.vertexCount; i++) {
+        box.expandByPoint(new THREE.Vector3(upload.positions[i * 3], upload.positions[i * 3 + 1], upload.positions[i * 3 + 2]));
       }
     }
     if (box.isEmpty()) return;
@@ -510,7 +545,7 @@ function AutoFit({ flatDomains, visible }: { flatDomains: FlatDomainSolid[]; vis
     camera.lookAt(center);
     camera.updateProjectionMatrix();
     fitted.current = true;
-  }, [flatDomains, visible, camera]);
+  }, [flatDomains, visible, uploads, camera]);
 
   return null;
 }
@@ -1313,7 +1348,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           </mesh>
         )}
 
-        <AutoFit flatDomains={flatDomains} visible={visible} />
+        <AutoFit flatDomains={flatDomains} visible={visible} uploads={uploads} />
         <ViewPresetController
           preset={viewPreset}
           flatDomains={flatDomains}
