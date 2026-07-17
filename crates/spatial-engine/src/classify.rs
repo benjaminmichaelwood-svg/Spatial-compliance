@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::bvh::SurfaceBvh;
 use crate::boundary::assign_cell_to_boundary;
 use crate::cutfill::SliverFilter;
-use crate::solid::{avg_thickness, compute_signed_volume, compute_surface_area};
+use crate::solid::{compute_signed_volume, compute_surface_area};
 use crate::types::{BlockSummary, BoundaryRegion, SolidMesh, TriSurface, Vec3};
 
 // ---------------------------------------------------------------------------
@@ -196,6 +196,143 @@ impl MeshBuilder {
             volume,
             surface_area,
         })
+    }
+
+    /// Split the accumulated mesh into connected components via union-find,
+    /// filter each body independently, and return only the survivors.
+    fn into_bodies(self, label: String, filter: &SliverFilter) -> Vec<SolidMesh> {
+        if self.vertices.is_empty() {
+            return Vec::new();
+        }
+
+        let n = self.vertices.len();
+
+        // -- Union-Find with path compression and union by rank --
+        let mut parent: Vec<usize> = (0..n).collect();
+        let mut rank: Vec<u8> = vec![0; n];
+
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]]; // path halving
+                x = parent[x];
+            }
+            x
+        }
+
+        fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
+            let ra = find(parent, a);
+            let rb = find(parent, b);
+            if ra == rb { return; }
+            if rank[ra] < rank[rb] {
+                parent[ra] = rb;
+            } else {
+                parent[rb] = ra;
+                if rank[ra] == rank[rb] {
+                    rank[ra] += 1;
+                }
+            }
+        }
+
+        // -- Bucket vertices by position (1mm precision) to find shared vertices --
+        use std::collections::HashMap;
+        let mut bucket: HashMap<(i64, i64, i64), usize> = HashMap::with_capacity(n);
+
+        for (i, v) in self.vertices.iter().enumerate() {
+            let key = (
+                (v.x * 1000.0).round() as i64,
+                (v.y * 1000.0).round() as i64,
+                (v.z * 1000.0).round() as i64,
+            );
+            match bucket.get(&key) {
+                Some(&existing) => union(&mut parent, &mut rank, i, existing),
+                None => { bucket.insert(key, i); }
+            }
+        }
+
+        // Also union all vertices within each triangle (they're in the same body)
+        for tri in &self.indices {
+            union(&mut parent, &mut rank, tri[0] as usize, tri[1] as usize);
+            union(&mut parent, &mut rank, tri[1] as usize, tri[2] as usize);
+        }
+
+        // -- Group triangles by component root --
+        let mut comp_tris: HashMap<usize, Vec<[u32; 3]>> = HashMap::new();
+        for tri in &self.indices {
+            let root = find(&mut parent, tri[0] as usize);
+            comp_tris.entry(root).or_default().push(*tri);
+        }
+
+        // -- Build one SolidMesh per component, filter, keep survivors --
+        let mut result: Vec<SolidMesh> = Vec::new();
+
+        for (_root, tris) in &comp_tris {
+            // Remap global vertex indices to compact local indices
+            let mut local_map: HashMap<usize, u32> = HashMap::new();
+            let mut local_verts: Vec<Vec3> = Vec::new();
+
+            let local_tris: Vec<[u32; 3]> = tris.iter().map(|tri| {
+                let mut lt = [0u32; 3];
+                for k in 0..3 {
+                    let gi = tri[k] as usize;
+                    let _canon = find(&mut parent, gi);
+                    lt[k] = *local_map.entry(gi).or_insert_with(|| {
+                        let idx = local_verts.len() as u32;
+                        local_verts.push(self.vertices[gi]);
+                        idx
+                    });
+                }
+                lt
+            }).collect();
+
+            // Compute volume and surface area
+            let volume = compute_signed_volume(&local_verts, &local_tris).abs();
+            let surface_area = compute_surface_area(&local_verts, &local_tris);
+
+            // Apply filter
+            if volume < filter.min_volume_m3 {
+                continue;
+            }
+            let thickness = if surface_area > 1e-9 { volume / surface_area } else { 0.0 };
+            if thickness < filter.min_thickness_m {
+                continue;
+            }
+
+            result.push(SolidMesh {
+                label: label.clone(),
+                vertices: local_verts,
+                indices: local_tris,
+                volume,
+                surface_area,
+            });
+        }
+
+        result
+    }
+}
+
+/// Merge multiple solid bodies into one SolidMesh for rendering.
+fn merge_solid_bodies(bodies: Vec<SolidMesh>, label: String) -> SolidMesh {
+    let mut all_verts: Vec<Vec3> = Vec::new();
+    let mut all_tris: Vec<[u32; 3]> = Vec::new();
+    let mut total_vol = 0.0;
+    let mut total_area = 0.0;
+
+    for body in bodies {
+        let offset = all_verts.len() as u32;
+        all_verts.extend(body.vertices);
+        for tri in body.indices {
+            all_tris.push([tri[0] + offset, tri[1] + offset, tri[2] + offset]);
+        }
+        total_vol += body.volume;
+        total_area += body.surface_area;
+    }
+
+    SolidMesh {
+        label,
+        vertices: all_verts,
+        indices: all_tris,
+        volume: total_vol,
+        surface_area: total_area,
     }
 }
 
@@ -644,7 +781,8 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
         processed_surfaces.push(si);
     }
 
-    // Convert builders into DomainSolids, applying the sliver filter
+    // Convert builders into DomainSolids, splitting connected components
+    // and filtering each body independently before merging survivors.
     let mut domains: Vec<DomainSolid> = Vec::new();
     for ((domain, block_idx), builder) in builders {
         let block_name = block_idx.map(|i| input.boundaries[i].name.clone());
@@ -652,23 +790,23 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
             Some(bn) => format!("{} — {}", domain.label(), bn),
             None => domain.label().to_string(),
         };
-        if let Some(solid) = builder.into_solid(label.clone()) {
-            if solid.volume < input.filter.min_volume_m3 {
-                continue;
-            }
-            if avg_thickness(&solid) < input.filter.min_thickness_m {
-                continue;
-            }
-            let volume = solid.volume;
-            domains.push(DomainSolid {
-                domain,
-                label,
-                color: domain.color().to_string(),
-                solid,
-                volume,
-                block_name,
-            });
+
+        let bodies = builder.into_bodies(label.clone(), &input.filter);
+        if bodies.is_empty() {
+            continue;
         }
+
+        let volume: f64 = bodies.iter().map(|b| b.volume).sum();
+        let solid = merge_solid_bodies(bodies, label.clone());
+
+        domains.push(DomainSolid {
+            domain,
+            label,
+            color: domain.color().to_string(),
+            solid,
+            volume,
+            block_name,
+        });
     }
 
     // Summary
