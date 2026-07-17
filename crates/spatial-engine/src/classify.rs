@@ -5,6 +5,7 @@ use crate::boundary::assign_cell_to_boundary;
 use crate::cutfill::SliverFilter;
 use crate::solid::{compute_signed_volume, compute_surface_area};
 use crate::types::{BlockSummary, BoundaryRegion, SolidMesh, TriSurface, Vec3};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -134,23 +135,56 @@ pub struct ConformanceInput<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// Mesh builder helper — constructs watertight triangular prisms
+// Shell builder — constructs closed solid shells (top + bottom + side walls)
 // ---------------------------------------------------------------------------
 
-struct MeshBuilder {
-    vertices: Vec<Vec3>,
-    indices: Vec<[u32; 3]>,
+struct ShellBuilder {
+    // Deduplicated vertices: top shell and bottom shell share XY positions
+    top_verts: Vec<Vec3>,
+    bot_verts: Vec<Vec3>,
+    // Map (x_mm, y_mm) → vertex index (same index in both top_verts and bot_verts)
+    xy_map: HashMap<(i64, i64), u32>,
+    // Triangles (indices into top_verts/bot_verts)
+    triangles: Vec<[u32; 3]>,
 }
 
-impl MeshBuilder {
+impl ShellBuilder {
     fn new() -> Self {
         Self {
-            vertices: Vec::new(),
-            indices: Vec::new(),
+            top_verts: Vec::new(),
+            bot_verts: Vec::new(),
+            xy_map: HashMap::new(),
+            triangles: Vec::new(),
         }
     }
 
-    fn add_tri_prism(&mut self, top: [Vec3; 3], bot_z: [f64; 3]) {
+    /// Get or create a vertex index for the given XY position.
+    /// Stores the upper Z in top_verts and lower Z in bot_verts.
+    /// If the vertex already exists, updates Z to the average (handles slight
+    /// interpolation differences at shared edges).
+    fn get_or_add_vertex(&mut self, x: f64, y: f64, z_top: f64, z_bot: f64) -> u32 {
+        let key = ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64);
+        match self.xy_map.get(&key) {
+            Some(&idx) => {
+                // Vertex exists — average Z values for consistency at shared edges
+                let i = idx as usize;
+                self.top_verts[i].z = (self.top_verts[i].z + z_top) * 0.5;
+                self.bot_verts[i].z = (self.bot_verts[i].z + z_bot) * 0.5;
+                idx
+            }
+            None => {
+                let idx = self.top_verts.len() as u32;
+                self.top_verts.push(Vec3::new(x, y, z_top));
+                self.bot_verts.push(Vec3::new(x, y, z_bot));
+                self.xy_map.insert(key, idx);
+                idx
+            }
+        }
+    }
+
+    /// Add one shell face (one source triangle classified into this domain).
+    /// top[0..3] are the upper surface vertices, bot_z[0..3] are the lower Z values.
+    fn add_shell_face(&mut self, top: [Vec3; 3], bot_z: [f64; 3]) {
         let z_diff_min = (top[0].z - bot_z[0])
             .min(top[1].z - bot_z[1])
             .min(top[2].z - bot_z[2]);
@@ -158,156 +192,200 @@ impl MeshBuilder {
             return;
         }
 
-        let base = self.vertices.len() as u32;
+        let i0 = self.get_or_add_vertex(top[0].x, top[0].y, top[0].z, bot_z[0]);
+        let i1 = self.get_or_add_vertex(top[1].x, top[1].y, top[1].z, bot_z[1]);
+        let i2 = self.get_or_add_vertex(top[2].x, top[2].y, top[2].z, bot_z[2]);
 
-        self.vertices.push(top[0]);
-        self.vertices.push(top[1]);
-        self.vertices.push(top[2]);
-        self.vertices.push(Vec3::new(top[0].x, top[0].y, bot_z[0]));
-        self.vertices.push(Vec3::new(top[1].x, top[1].y, bot_z[1]));
-        self.vertices.push(Vec3::new(top[2].x, top[2].y, bot_z[2]));
-
-        // Top face
-        self.indices.push([base, base + 1, base + 2]);
-        // Bottom face
-        self.indices.push([base + 3, base + 5, base + 4]);
-        // Side faces
-        let sides: [(u32, u32); 3] = [(0, 1), (1, 2), (2, 0)];
-        for &(a, b) in &sides {
-            let ta = base + a;
-            let tb = base + b;
-            let ba = base + 3 + a;
-            let bb = base + 3 + b;
-            self.indices.push([ta, bb, tb]);
-            self.indices.push([ta, ba, bb]);
+        // Degenerate check
+        if i0 == i1 || i1 == i2 || i0 == i2 {
+            return;
         }
+
+        self.triangles.push([i0, i1, i2]);
     }
 
+    /// Build the final closed solid: top shell + bottom shell + boundary side walls.
     fn into_solid(self, label: String) -> Option<SolidMesh> {
-        if self.vertices.is_empty() {
+        if self.triangles.is_empty() {
             return None;
         }
-        let volume = compute_signed_volume(&self.vertices, &self.indices).abs();
-        let surface_area = compute_surface_area(&self.vertices, &self.indices);
+
+        let n_verts = self.top_verts.len();
+        let n_tris = self.triangles.len();
+
+        // --- Find boundary edges ---
+        // An edge (a, b) normalized as (min, max) appears in exactly one triangle = boundary
+        let mut edge_count: HashMap<(u32, u32), u32> = HashMap::with_capacity(n_tris * 3);
+        for tri in &self.triangles {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edge_count.entry(key).or_insert(0) += 1;
+            }
+        }
+        let boundary_edges: Vec<(u32, u32)> = edge_count
+            .into_iter()
+            .filter(|&(_, count)| count == 1)
+            .map(|(edge, _)| edge)
+            .collect();
+
+        // --- Assemble the solid mesh ---
+        // Vertex layout: [top_verts..., bot_verts...]
+        // Top shell indices use 0..n_verts
+        // Bottom shell indices use n_verts..2*n_verts
+        let bot_offset = n_verts as u32;
+
+        let mut vertices = Vec::with_capacity(n_verts * 2);
+        vertices.extend_from_slice(&self.top_verts);
+        vertices.extend_from_slice(&self.bot_verts);
+
+        let mut indices = Vec::with_capacity(n_tris * 2 + boundary_edges.len() * 2);
+
+        // Top shell (original winding)
+        for tri in &self.triangles {
+            indices.push([tri[0], tri[1], tri[2]]);
+        }
+
+        // Bottom shell (reversed winding)
+        for tri in &self.triangles {
+            indices.push([
+                tri[0] + bot_offset,
+                tri[2] + bot_offset,
+                tri[1] + bot_offset,
+            ]);
+        }
+
+        // Side walls at boundary edges
+        for &(a, b) in &boundary_edges {
+            let ta = a;           // top vertex a
+            let tb = b;           // top vertex b
+            let ba = a + bot_offset;  // bottom vertex a
+            let bb = b + bot_offset;  // bottom vertex b
+
+            // Two triangles forming a quad between top and bottom edges
+            indices.push([ta, bb, tb]);
+            indices.push([ta, ba, bb]);
+        }
+
+        let volume = compute_signed_volume(&vertices, &indices).abs();
+        let surface_area = compute_surface_area(&vertices, &indices);
+
         Some(SolidMesh {
             label,
-            vertices: self.vertices,
-            indices: self.indices,
+            vertices,
+            indices,
             volume,
             surface_area,
         })
     }
+}
 
-    /// Split the accumulated mesh into connected components via union-find,
-    /// filter each body independently, and return only the survivors.
-    fn into_bodies(self, label: String, filter: &SliverFilter) -> Vec<SolidMesh> {
-        if self.vertices.is_empty() {
-            return Vec::new();
-        }
-
-        let n = self.vertices.len();
-
-        // -- Union-Find with path compression and union by rank --
-        let mut parent: Vec<usize> = (0..n).collect();
-        let mut rank: Vec<u8> = vec![0; n];
-
-        fn find(parent: &mut [usize], mut x: usize) -> usize {
-            while parent[x] != x {
-                parent[x] = parent[parent[x]]; // path halving
-                x = parent[x];
-            }
-            x
-        }
-
-        fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
-            let ra = find(parent, a);
-            let rb = find(parent, b);
-            if ra == rb { return; }
-            if rank[ra] < rank[rb] {
-                parent[ra] = rb;
-            } else {
-                parent[rb] = ra;
-                if rank[ra] == rank[rb] {
-                    rank[ra] += 1;
-                }
-            }
-        }
-
-        // -- Bucket vertices by position (1mm precision) to find shared vertices --
-        use std::collections::HashMap;
-        let mut bucket: HashMap<(i64, i64, i64), usize> = HashMap::with_capacity(n);
-
-        for (i, v) in self.vertices.iter().enumerate() {
-            let key = (
-                (v.x * 1000.0).round() as i64,
-                (v.y * 1000.0).round() as i64,
-                (v.z * 1000.0).round() as i64,
-            );
-            match bucket.get(&key) {
-                Some(&existing) => union(&mut parent, &mut rank, i, existing),
-                None => { bucket.insert(key, i); }
-            }
-        }
-
-        // Also union all vertices within each triangle (they're in the same body)
-        for tri in &self.indices {
-            union(&mut parent, &mut rank, tri[0] as usize, tri[1] as usize);
-            union(&mut parent, &mut rank, tri[1] as usize, tri[2] as usize);
-        }
-
-        // -- Group triangles by component root --
-        let mut comp_tris: HashMap<usize, Vec<[u32; 3]>> = HashMap::new();
-        for tri in &self.indices {
-            let root = find(&mut parent, tri[0] as usize);
-            comp_tris.entry(root).or_default().push(*tri);
-        }
-
-        // -- Build one SolidMesh per component, filter, keep survivors --
-        let mut result: Vec<SolidMesh> = Vec::new();
-
-        for (_root, tris) in &comp_tris {
-            // Remap global vertex indices to compact local indices
-            let mut local_map: HashMap<usize, u32> = HashMap::new();
-            let mut local_verts: Vec<Vec3> = Vec::new();
-
-            let local_tris: Vec<[u32; 3]> = tris.iter().map(|tri| {
-                let mut lt = [0u32; 3];
-                for k in 0..3 {
-                    let gi = tri[k] as usize;
-                    let _canon = find(&mut parent, gi);
-                    lt[k] = *local_map.entry(gi).or_insert_with(|| {
-                        let idx = local_verts.len() as u32;
-                        local_verts.push(self.vertices[gi]);
-                        idx
-                    });
-                }
-                lt
-            }).collect();
-
-            // Compute volume and surface area
-            let volume = compute_signed_volume(&local_verts, &local_tris).abs();
-            let surface_area = compute_surface_area(&local_verts, &local_tris);
-
-            // Apply filter
-            if volume < filter.min_volume_m3 {
-                continue;
-            }
-            let thickness = if surface_area > 1e-9 { volume / surface_area } else { 0.0 };
-            if thickness < filter.min_thickness_m {
-                continue;
-            }
-
-            result.push(SolidMesh {
-                label: label.clone(),
-                vertices: local_verts,
-                indices: local_tris,
-                volume,
-                surface_area,
-            });
-        }
-
-        result
+/// Split a solid mesh into connected components via union-find,
+/// filter each body independently, and return only the survivors.
+fn filter_solid_bodies(solid: SolidMesh, filter: &SliverFilter) -> Vec<SolidMesh> {
+    let n = solid.vertices.len();
+    if n == 0 {
+        return Vec::new();
     }
+
+    // -- Union-Find with path compression and union by rank --
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut rank: Vec<u8> = vec![0; n];
+
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]]; // path halving
+            x = parent[x];
+        }
+        x
+    }
+
+    fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra == rb { return; }
+        if rank[ra] < rank[rb] {
+            parent[ra] = rb;
+        } else {
+            parent[rb] = ra;
+            if rank[ra] == rank[rb] {
+                rank[ra] += 1;
+            }
+        }
+    }
+
+    // -- Bucket vertices by position (1mm precision) to find shared vertices --
+    let mut bucket: HashMap<(i64, i64, i64), usize> = HashMap::with_capacity(n);
+
+    for (i, v) in solid.vertices.iter().enumerate() {
+        let key = (
+            (v.x * 1000.0).round() as i64,
+            (v.y * 1000.0).round() as i64,
+            (v.z * 1000.0).round() as i64,
+        );
+        match bucket.get(&key) {
+            Some(&existing) => union(&mut parent, &mut rank, i, existing),
+            None => { bucket.insert(key, i); }
+        }
+    }
+
+    // Also union all vertices within each triangle (they're in the same body)
+    for tri in &solid.indices {
+        union(&mut parent, &mut rank, tri[0] as usize, tri[1] as usize);
+        union(&mut parent, &mut rank, tri[1] as usize, tri[2] as usize);
+    }
+
+    // -- Group triangles by component root --
+    let mut comp_tris: HashMap<usize, Vec<[u32; 3]>> = HashMap::new();
+    for tri in &solid.indices {
+        let root = find(&mut parent, tri[0] as usize);
+        comp_tris.entry(root).or_default().push(*tri);
+    }
+
+    // -- Build one SolidMesh per component, filter, keep survivors --
+    let label = solid.label;
+    let mut result: Vec<SolidMesh> = Vec::new();
+
+    for (_root, tris) in &comp_tris {
+        // Remap global vertex indices to compact local indices
+        let mut local_map: HashMap<usize, u32> = HashMap::new();
+        let mut local_verts: Vec<Vec3> = Vec::new();
+
+        let local_tris: Vec<[u32; 3]> = tris.iter().map(|tri| {
+            let mut lt = [0u32; 3];
+            for k in 0..3 {
+                let gi = tri[k] as usize;
+                lt[k] = *local_map.entry(gi).or_insert_with(|| {
+                    let idx = local_verts.len() as u32;
+                    local_verts.push(solid.vertices[gi]);
+                    idx
+                });
+            }
+            lt
+        }).collect();
+
+        // Compute volume and surface area
+        let volume = compute_signed_volume(&local_verts, &local_tris).abs();
+        let surface_area = compute_surface_area(&local_verts, &local_tris);
+
+        // Apply filter
+        if volume < filter.min_volume_m3 {
+            continue;
+        }
+        let thickness = if surface_area > 1e-9 { volume / surface_area } else { 0.0 };
+        if thickness < filter.min_thickness_m {
+            continue;
+        }
+
+        result.push(SolidMesh {
+            label: label.clone(),
+            vertices: local_verts,
+            indices: local_tris,
+            volume,
+            surface_area,
+        });
+    }
+
+    result
 }
 
 /// Merge multiple solid bodies into one SolidMesh for rendering.
@@ -611,8 +689,7 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
 
     let has_boundaries = !input.boundaries.is_empty();
 
-    use std::collections::HashMap;
-    let mut builders: HashMap<(Domain, Option<usize>), MeshBuilder> = HashMap::new();
+    let mut builders: HashMap<(Domain, Option<usize>), ShellBuilder> = HashMap::new();
 
     let mut present_indices: Vec<usize> = (0..5).filter(|&i| opt_surfaces[i].is_some()).collect();
     present_indices.sort_by(|&a, &b| {
@@ -771,9 +848,9 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
                         Vec3::new(verts[2].x, verts[2].y, iv.upper),
                     ];
                     let bot_fallback = [iv.lower, iv.lower, iv.lower];
-                    builders.entry(key).or_insert_with(MeshBuilder::new).add_tri_prism(top_fallback, bot_fallback);
+                    builders.entry(key).or_insert_with(ShellBuilder::new).add_shell_face(top_fallback, bot_fallback);
                 } else {
-                    builders.entry(key).or_insert_with(MeshBuilder::new).add_tri_prism(top, bot_z);
+                    builders.entry(key).or_insert_with(ShellBuilder::new).add_shell_face(top, bot_z);
                 }
             }
         }
@@ -791,22 +868,23 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
             None => domain.label().to_string(),
         };
 
-        let bodies = builder.into_bodies(label.clone(), &input.filter);
-        if bodies.is_empty() {
-            continue;
+        if let Some(solid) = builder.into_solid(label.clone()) {
+            let bodies = filter_solid_bodies(solid, &input.filter);
+            if bodies.is_empty() {
+                continue;
+            }
+            let volume: f64 = bodies.iter().map(|b| b.volume).sum();
+            let solid = merge_solid_bodies(bodies, label.clone());
+
+            domains.push(DomainSolid {
+                domain,
+                label,
+                color: domain.color().to_string(),
+                solid,
+                volume,
+                block_name,
+            });
         }
-
-        let volume: f64 = bodies.iter().map(|b| b.volume).sum();
-        let solid = merge_solid_bodies(bodies, label.clone());
-
-        domains.push(DomainSolid {
-            domain,
-            label,
-            color: domain.color().to_string(),
-            solid,
-            volume,
-            block_name,
-        });
     }
 
     // Summary
