@@ -781,16 +781,20 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
 // ---------------------------------------------------------------------------
 
 pub fn classify_surface_domains(input: &ConformanceInput) -> Vec<(usize, Vec<u8>, Vec<f32>)> {
-    let ref_surface = match input.production_end {
-        Some(s) => s,
-        None => return Vec::new(),
+    // Reference surface is production_end if available, otherwise schedule_end
+    let (ref_surface, ref_idx) = if let Some(s) = input.production_end {
+        (s, 1usize) // index 1 = production_end
+    } else if let Some(s) = input.schedule_end {
+        (s, 3usize) // index 3 = schedule_end
+    } else {
+        return Vec::new();
     };
 
     let bvhs: [Option<SurfaceBvh>; 5] = [
         input.production_start.map(SurfaceBvh::build),
-        None, // production_end IS the ref surface — use its own Z
+        if ref_idx == 1 { None } else { input.production_end.map(SurfaceBvh::build) },
         input.schedule_start.map(SurfaceBvh::build),
-        input.schedule_end.map(SurfaceBvh::build),
+        if ref_idx == 3 { None } else { input.schedule_end.map(SurfaceBvh::build) },
         input.schedule_future.map(SurfaceBvh::build),
     ];
 
@@ -806,9 +810,9 @@ pub fn classify_surface_domains(input: &ConformanceInput) -> Vec<(usize, Vec<u8>
 
         let zs: [Option<f64>; 5] = [
             bvhs[0].as_ref().and_then(|b| b.interpolate_z(cx, cy)),
-            Some(cz),
+            if ref_idx == 1 { Some(cz) } else { bvhs[1].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
             bvhs[2].as_ref().and_then(|b| b.interpolate_z(cx, cy)),
-            bvhs[3].as_ref().and_then(|b| b.interpolate_z(cx, cy)),
+            if ref_idx == 3 { Some(cz) } else { bvhs[3].as_ref().and_then(|b| b.interpolate_z(cx, cy)) },
             bvhs[4].as_ref().and_then(|b| b.interpolate_z(cx, cy)),
         ];
 
@@ -846,7 +850,7 @@ pub fn classify_surface_domains(input: &ConformanceInput) -> Vec<(usize, Vec<u8>
         }
     }
 
-    vec![(1, domain_map, thickness_map)]
+    vec![(ref_idx, domain_map, thickness_map)]
 }
 
 // ---------------------------------------------------------------------------
@@ -1482,5 +1486,32 @@ mod tests {
         assert!(!result.domains.is_empty(), "Should produce at least one domain");
         let total_vol: f64 = result.domains.iter().map(|d| d.volume).sum();
         assert!(total_vol > 0.0, "Total volume should be positive");
+    }
+
+    #[test]
+    fn classify_surface_domains_schedule_only() {
+        let ss = flat(100.0, "ss", 10.0);
+        let se = flat(90.0, "se", 10.0);
+        let sf = flat(80.0, "sf", 10.0);
+
+        let input = ConformanceInput {
+            production_start: None,
+            production_end: None,
+            schedule_start: Some(&ss),
+            schedule_end: Some(&se),
+            schedule_future: Some(&sf),
+            mode: Mode::Dig,
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            boundaries: &[],
+        };
+
+        let maps = classify_surface_domains(&input);
+        assert!(!maps.is_empty(), "Should return paint maps for schedule-only");
+        let (ref_idx, domain_map, thickness_map) = &maps[0];
+        assert_eq!(*ref_idx, 3, "Reference should be schedule_end (index 3)");
+        assert!(!domain_map.is_empty(), "Domain map should not be empty");
+        assert!(!thickness_map.is_empty(), "Thickness map should not be empty");
+        let nonzero_thick: usize = thickness_map.iter().filter(|&&t| t > 0.0).count();
+        assert!(nonzero_thick > 0, "Should have nonzero thickness values, got 0/{}", thickness_map.len());
     }
 }
