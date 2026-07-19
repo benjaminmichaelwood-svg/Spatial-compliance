@@ -139,6 +139,7 @@ export default function LayerPanel({
 }: Props) {
   const [expandedDomain, setExpandedDomain] = useState<string | null>(null);
   const [expandedSurface, setExpandedSurface] = useState<SurfaceRole | null>(null);
+  const [inputSurfacesCollapsed, setInputSurfacesCollapsed] = useState(true);
   const [hideBelowEnabled, setHideBelowEnabled] = useState(false);
   const [hideBelowValue, setHideBelowValue] = useState(0.5);
   const scaleDebounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -159,10 +160,55 @@ export default function LayerPanel({
 
   return (
     <div className="sidebar-section">
+      {/* Summary pinned at top */}
+      <div className="rounded-lg bg-slate-800/50 p-3 mb-3">
+        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+          Summary
+        </div>
+        <div className="space-y-1.5 text-xs">
+          <div className="flex justify-between">
+            <span className="text-slate-400">Conformance</span>
+            <span className="font-mono font-semibold text-emerald-400">
+              {result.summary.conformance_percent.toFixed(1)}%
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-400">Planned Vol.</span>
+            <span className="font-mono text-slate-300">
+              {formatVolume(result.summary.total_planned_volume)} m³
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-400">Actual Vol.</span>
+            <span className="font-mono text-slate-300">
+              {formatVolume(result.summary.total_actual_volume)} m³
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-400">Net</span>
+            <span className="font-mono text-slate-300">
+              {formatVolume(result.summary.total_planned_volume - result.summary.total_actual_volume)} m³
+            </span>
+          </div>
+        </div>
+      </div>
+
       {uploadedRoles.length > 0 && (
         <>
-          <div className="sidebar-heading">Input Surfaces</div>
-          <div className="mb-3 space-y-0.5">
+          <button
+            type="button"
+            onClick={() => setInputSurfacesCollapsed(c => !c)}
+            className="sidebar-heading flex w-full items-center justify-between text-left"
+          >
+            <span>Input Surfaces</span>
+            <svg
+              className={`h-3 w-3 text-slate-500 transition-transform ${inputSurfacesCollapsed ? '' : 'rotate-180'}`}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {!inputSurfacesCollapsed && <div className="mb-3 space-y-0.5">
             {uploadedRoles.map(({ key, label }) => {
               const upload = uploads.get(key)!;
               const isOn = surfaceVisible.has(key);
@@ -209,7 +255,7 @@ export default function LayerPanel({
                 </div>
               );
             })}
-          </div>
+          </div>}
         </>
       )}
 
@@ -390,38 +436,6 @@ export default function LayerPanel({
             </div>
           );
         })}
-      </div>
-
-      <div className="mt-4 rounded-lg bg-slate-800/50 p-3">
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-          Summary
-        </div>
-        <div className="space-y-1.5 text-xs">
-          <div className="flex justify-between">
-            <span className="text-slate-400">Conformance</span>
-            <span className="font-mono font-semibold text-emerald-400">
-              {result.summary.conformance_percent.toFixed(1)}%
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-slate-400">Planned Vol.</span>
-            <span className="font-mono text-slate-300">
-              {formatVolume(result.summary.total_planned_volume)} m³
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-slate-400">Actual Vol.</span>
-            <span className="font-mono text-slate-300">
-              {formatVolume(result.summary.total_actual_volume)} m³
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-slate-400">Net</span>
-            <span className="font-mono text-slate-300">
-              {formatVolume(result.summary.total_planned_volume - result.summary.total_actual_volume)} m³
-            </span>
-          </div>
-        </div>
       </div>
 
       {blockSummaries.length > 0 && (
