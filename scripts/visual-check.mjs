@@ -85,18 +85,36 @@ async function main() {
   await page.locator('button:has-text("Create Comparison")').click();
   await page.waitForTimeout(2000);
 
-  // 3. Upload test surfaces
+  // 3. Upload test surfaces (real .00t files from test-data/)
   console.log('3. Uploading test surfaces...');
   const fileInputs = page.locator('.sidebar-section input[type="file"]');
-  const files = [
+  // Map: [filename, role index] where roles are:
+  //   0=production_start, 1=production_end, 2=schedule_start, 3=schedule_end, 4=schedule_future
+  const files = [];
+  const available = [
     ['production_start.00t', 0],
     ['production_end.00t', 1],
     ['schedule_start.00t', 2],
     ['schedule_end.00t', 3],
+    ['schedule_future.00t', 4],
   ];
+  const { existsSync } = await import('fs');
+  for (const [file, idx] of available) {
+    if (existsSync(`${TEST_DATA}/${file}`)) {
+      files.push([file, idx]);
+    }
+  }
+  if (files.length < 2) {
+    console.error(`FATAL: Need at least 2 surfaces in ${TEST_DATA}, found ${files.length}`);
+    await browser.close();
+    process.exit(1);
+  }
+  console.log(`   Found ${files.length} surfaces: ${files.map(f => f[0]).join(', ')}`);
   for (const [file, idx] of files) {
+    console.log(`   Uploading ${file} to slot ${idx}...`);
     await fileInputs.nth(idx).setInputFiles(`${TEST_DATA}/${file}`);
-    await page.waitForTimeout(2000);
+    // Real surfaces are large — wait longer for parsing
+    await page.waitForTimeout(5000);
   }
   const assigned = await page.locator('text=/\\d+\\/\\d+ assigned/').first().textContent().catch(() => '?');
   console.log(`   ${assigned}`);
@@ -110,8 +128,8 @@ async function main() {
     process.exit(1);
   }
   await runBtn.click();
-  await page.waitForSelector('text="Conformance Domains"', { timeout: 60000 });
-  await page.waitForTimeout(5000);
+  await page.waitForSelector('text="Conformance Domains"', { timeout: 300000 });
+  await page.waitForTimeout(8000);
 
   // 5. Screenshots
   console.log('5. Taking screenshots...');
@@ -225,18 +243,73 @@ async function main() {
     console.log('   WARNING: No thickness controls found (may need scrolling or thicknessMaps empty)');
   }
 
-  // 7. Toggle a domain solid on to check it renders
-  console.log('7. Testing domain solid toggle...');
+  // 7. Toggle a domain solid on and capture from multiple angles
+  console.log('7. Testing domain solid from multiple angles...');
+  let solidDomain = null;
   for (const label of domainLabels) {
     const domainBtn = page.locator(`button:has(div:text-is("${label}"))`).first();
     if (await domainBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
       await domainBtn.click();
-      await page.waitForTimeout(2000);
-      await page.screenshot({ path: `${SHOTS}/06-domain-solid-on.png` });
-      console.log(`   06-domain-solid-on.png (toggled "${label}")`);
+      await page.waitForTimeout(3000);
+      solidDomain = { label, btn: domainBtn };
+
+      // Fit all with solid
+      await page.locator('button[title="Fit All"]').click();
+      await page.waitForTimeout(3000);
+      await page.screenshot({ path: `${SHOTS}/06-solid-fitall.png` });
+      console.log(`   06-solid-fitall.png (${label})`);
+
+      // Iso view
+      await page.locator('button[title="Iso"]').click();
+      await page.waitForTimeout(3000);
+      await page.screenshot({ path: `${SHOTS}/07-solid-iso.png` });
+      console.log('   07-solid-iso.png');
+
+      // North view (elevation from south looking north)
+      await page.locator('button[title="North"]').click();
+      await page.waitForTimeout(3000);
+      await page.screenshot({ path: `${SHOTS}/08-solid-north.png` });
+      console.log('   08-solid-north.png');
+
+      // East view
+      await page.locator('button[title="East"]').click();
+      await page.waitForTimeout(3000);
+      await page.screenshot({ path: `${SHOTS}/09-solid-east.png` });
+      console.log('   09-solid-east.png');
+
+      // Plan view with solid
+      await page.locator('button[title="Plan"]').click();
+      await page.waitForTimeout(3000);
+      await page.screenshot({ path: `${SHOTS}/10-solid-plan.png` });
+      console.log('   10-solid-plan.png');
+
       break;
     }
   }
+
+  // 8. Toggle input surfaces visible alongside domain solid
+  console.log('8. Input surfaces overlay...');
+  await page.locator('button[title="Iso"]').click();
+  await page.waitForTimeout(2000);
+
+  // Scroll to Input Surfaces section
+  await page.evaluate(() => {
+    const el = document.querySelector('.overflow-y-auto');
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+  await page.waitForTimeout(500);
+
+  // Toggle each input surface visible
+  for (const name of ['Schedule Start', 'Schedule End', 'Schedule Future']) {
+    const btn = page.locator(`button:has(div:text-is("${name}"))`).first();
+    if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await btn.click();
+      await page.waitForTimeout(500);
+    }
+  }
+  await page.waitForTimeout(3000);
+  await page.screenshot({ path: `${SHOTS}/11-surfaces-and-solid.png` });
+  console.log('   11-surfaces-and-solid.png');
 
   // Done
   console.log('\nScreenshots saved to visual-check/');
