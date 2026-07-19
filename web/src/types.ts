@@ -86,8 +86,8 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  minVolume: 1.0,
-  minThickness: 0.1,
+  minVolume: 100.0,
+  minThickness: 0.5,
 };
 
 export interface ObjectStyle {
