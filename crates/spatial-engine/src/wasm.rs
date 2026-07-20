@@ -35,6 +35,7 @@ pub fn run_cut_fill(
     let filter = SliverFilter {
         min_volume_m3: min_volume,
         min_thickness_m: min_thickness,
+        min_triangles: 0,
     };
 
     let result = compute_cut_fill(&a, &b, filter);
@@ -57,6 +58,7 @@ pub fn run_cut_fill_from_json(
     let filter = SliverFilter {
         min_volume_m3: min_volume,
         min_thickness_m: min_thickness,
+        min_triangles: 0,
     };
 
     let result = compute_cut_fill(&a, &b, filter);
@@ -107,6 +109,7 @@ pub fn run_conformance(
         filter: SliverFilter {
             min_volume_m3: min_volume,
             min_thickness_m: min_thickness,
+            min_triangles: 20,
         },
         boundaries: &[],
     };
@@ -148,6 +151,7 @@ pub fn run_conformance_from_binary(
         filter: SliverFilter {
             min_volume_m3: min_volume,
             min_thickness_m: min_thickness,
+            min_triangles: 20,
         },
         boundaries: &[],
     };
@@ -193,6 +197,7 @@ pub fn run_conformance_with_boundaries(
         filter: SliverFilter {
             min_volume_m3: min_volume,
             min_thickness_m: min_thickness,
+            min_triangles: 20,
         },
         boundaries: &boundaries,
     };
@@ -295,6 +300,7 @@ pub fn run_conformance_flat(
         filter: SliverFilter {
             min_volume_m3: min_volume,
             min_thickness_m: min_thickness,
+            min_triangles: 20,
         },
         boundaries: &boundaries,
     };

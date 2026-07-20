@@ -6,6 +6,7 @@ use crate::types::{CutFillResult, SolidMesh, TriSurface, Vec3};
 pub struct SliverFilter {
     pub min_volume_m3: f64,
     pub min_thickness_m: f64,
+    pub min_triangles: usize,
 }
 
 impl Default for SliverFilter {
@@ -13,6 +14,7 @@ impl Default for SliverFilter {
         Self {
             min_volume_m3: 1.0,
             min_thickness_m: 0.1,
+            min_triangles: 20,
         }
     }
 }
@@ -133,6 +135,7 @@ mod tests {
         let result = compute_cut_fill(&surface_a, &surface_b, SliverFilter {
             min_volume_m3: 0.1,
             min_thickness_m: 0.01,
+            min_triangles: 0,
         });
 
         assert!(
@@ -169,6 +172,7 @@ mod tests {
         let strict_filter = SliverFilter {
             min_volume_m3: 0.5,
             min_thickness_m: 0.05,
+            min_triangles: 0,
         };
         let result = compute_cut_fill(&upper, &lower, strict_filter);
 
@@ -186,6 +190,7 @@ mod tests {
         let filter = SliverFilter {
             min_volume_m3: 1.0,
             min_thickness_m: 0.1,
+            min_triangles: 0,
         };
         let result = compute_cut_fill(&upper, &lower, filter);
 
@@ -222,6 +227,7 @@ mod tests {
         let result = compute_cut_fill(&upper, &lower, SliverFilter {
             min_volume_m3: 0.01,
             min_thickness_m: 0.001,
+            min_triangles: 0,
         });
 
         let expected = 4000.0;

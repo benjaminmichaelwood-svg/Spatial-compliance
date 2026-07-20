@@ -122,6 +122,10 @@ impl TriSurface {
         )
     }
 
+    pub fn triangle_indices(&self, i: usize) -> [u32; 3] {
+        self.indices[i]
+    }
+
     pub fn num_triangles(&self) -> usize {
         self.indices.len()
     }

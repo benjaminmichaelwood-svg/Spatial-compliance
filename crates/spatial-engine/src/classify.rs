@@ -201,181 +201,54 @@ impl ShellBuilder {
         self.triangles.push([i0, i1, i2]);
     }
 
-    /// Split into connected components on 2D surface topology,
-    /// build a separate closed shell for each component, filter by
-    /// volume/thickness, and return survivors.
-    fn into_filtered_solids(self, label: String, filter: &SliverFilter) -> Vec<SolidMesh> {
+    fn into_solid(self, label: String) -> Option<SolidMesh> {
         if self.triangles.is_empty() {
-            return Vec::new();
+            return None;
         }
 
         let n = self.top_verts.len();
+        let bot_offset = n as u32;
 
-        // --- Union-Find on 2D surface triangles ---
-        let mut parent: Vec<usize> = (0..n).collect();
-        let mut rank: Vec<u8> = vec![0; n];
-
-        fn find(parent: &mut [usize], mut x: usize) -> usize {
-            while parent[x] != x {
-                parent[x] = parent[parent[x]];
-                x = parent[x];
-            }
-            x
-        }
-
-        fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
-            let ra = find(parent, a);
-            let rb = find(parent, b);
-            if ra == rb { return; }
-            if rank[ra] < rank[rb] {
-                parent[ra] = rb;
-            } else {
-                parent[rb] = ra;
-                if rank[ra] == rank[rb] { rank[ra] += 1; }
-            }
-        }
-
-        // Connect vertices that share triangles (2D surface connectivity)
+        let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
         for tri in &self.triangles {
-            union(&mut parent, &mut rank, tri[0] as usize, tri[1] as usize);
-            union(&mut parent, &mut rank, tri[1] as usize, tri[2] as usize);
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edge_count.entry(key).or_insert(0) += 1;
+            }
         }
+        let boundary_edges: Vec<(u32, u32)> = edge_count
+            .into_iter()
+            .filter(|&(_, count)| count == 1)
+            .map(|(edge, _)| edge)
+            .collect();
 
-        // Group triangles by component
-        let mut comp_tris: HashMap<usize, Vec<[u32; 3]>> = HashMap::new();
+        let mut vertices = Vec::with_capacity(n * 2);
+        vertices.extend_from_slice(&self.top_verts);
+        vertices.extend_from_slice(&self.bot_verts);
+
+        let mut indices = Vec::with_capacity(self.triangles.len() * 2 + boundary_edges.len() * 2);
+
         for tri in &self.triangles {
-            let root = find(&mut parent, tri[0] as usize);
-            comp_tris.entry(root).or_default().push(*tri);
+            indices.push([tri[0], tri[1], tri[2]]);
+        }
+        for tri in &self.triangles {
+            indices.push([tri[0] + bot_offset, tri[2] + bot_offset, tri[1] + bot_offset]);
+        }
+        for &(a, b) in &boundary_edges {
+            indices.push([a, b + bot_offset, b]);
+            indices.push([a, a + bot_offset, b + bot_offset]);
         }
 
-        // --- Build a shell solid per component, filter each ---
-        let mut result: Vec<SolidMesh> = Vec::new();
+        let volume = compute_signed_volume(&vertices, &indices).abs();
+        let surface_area = compute_surface_area(&vertices, &indices);
 
-        for (_root, tris) in &comp_tris {
-            // Remap vertex indices to compact local arrays
-            let mut local_map: HashMap<u32, u32> = HashMap::new();
-            let mut local_top: Vec<Vec3> = Vec::new();
-            let mut local_bot: Vec<Vec3> = Vec::new();
-
-            let local_tris: Vec<[u32; 3]> = tris.iter().map(|tri| {
-                let mut lt = [0u32; 3];
-                for k in 0..3 {
-                    let gi = tri[k];
-                    lt[k] = *local_map.entry(gi).or_insert_with(|| {
-                        let idx = local_top.len() as u32;
-                        local_top.push(self.top_verts[gi as usize]);
-                        local_bot.push(self.bot_verts[gi as usize]);
-                        idx
-                    });
-                }
-                lt
-            }).collect();
-
-            let n_local = local_top.len();
-            let bot_offset = n_local as u32;
-
-            // Find boundary edges for this component
-            let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
-            for tri in &local_tris {
-                for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
-                    let key = if a < b { (a, b) } else { (b, a) };
-                    *edge_count.entry(key).or_insert(0) += 1;
-                }
-            }
-            let boundary_edges: Vec<(u32, u32)> = edge_count
-                .into_iter()
-                .filter(|&(_, count)| count == 1)
-                .map(|(edge, _)| edge)
-                .collect();
-
-            // Assemble: [top_verts..., bot_verts...]
-            let mut vertices = Vec::with_capacity(n_local * 2);
-            vertices.extend_from_slice(&local_top);
-            vertices.extend_from_slice(&local_bot);
-
-            let mut indices = Vec::with_capacity(local_tris.len() * 2 + boundary_edges.len() * 2);
-
-            // Top shell
-            for tri in &local_tris {
-                indices.push([tri[0], tri[1], tri[2]]);
-            }
-
-            // Bottom shell (reversed winding)
-            for tri in &local_tris {
-                indices.push([
-                    tri[0] + bot_offset,
-                    tri[2] + bot_offset,
-                    tri[1] + bot_offset,
-                ]);
-            }
-
-            // Side walls
-            for &(a, b) in &boundary_edges {
-                indices.push([a, b + bot_offset, b]);
-                indices.push([a, a + bot_offset, b + bot_offset]);
-            }
-
-            let volume = compute_signed_volume(&vertices, &indices).abs();
-            let surface_area = compute_surface_area(&vertices, &indices);
-
-            #[cfg(target_arch = "wasm32")]
-            web_sys::console::log_1(&format!(
-                "BODY: domain={} tris={} vol={:.1}m³ thickness={:.2}m area={:.1}m² VERDICT={}",
-                label,
-                local_tris.len(),
-                volume,
-                if surface_area > 1e-9 { volume / surface_area } else { 0.0 },
-                surface_area,
-                if volume < filter.min_volume_m3 { "FILTERED(vol)" }
-                else if (if surface_area > 1e-9 { volume / surface_area } else { 0.0 }) < filter.min_thickness_m { "FILTERED(thick)" }
-                else { "KEPT" }
-            ).into());
-
-            // Filter
-            if volume < filter.min_volume_m3 {
-                continue;
-            }
-            let thickness = if surface_area > 1e-9 { volume / surface_area } else { 0.0 };
-            if thickness < filter.min_thickness_m {
-                continue;
-            }
-
-            result.push(SolidMesh {
-                label: label.clone(),
-                vertices,
-                indices,
-                volume,
-                surface_area,
-            });
-        }
-
-        result
-    }
-}
-
-/// Merge multiple solid bodies into one SolidMesh for rendering.
-fn merge_solid_bodies(bodies: Vec<SolidMesh>, label: String) -> SolidMesh {
-    let mut all_verts: Vec<Vec3> = Vec::new();
-    let mut all_tris: Vec<[u32; 3]> = Vec::new();
-    let mut total_vol = 0.0;
-    let mut total_area = 0.0;
-
-    for body in bodies {
-        let offset = all_verts.len() as u32;
-        all_verts.extend(body.vertices);
-        for tri in body.indices {
-            all_tris.push([tri[0] + offset, tri[1] + offset, tri[2] + offset]);
-        }
-        total_vol += body.volume;
-        total_area += body.surface_area;
-    }
-
-    SolidMesh {
-        label,
-        vertices: all_verts,
-        indices: all_tris,
-        volume: total_vol,
-        surface_area: total_area,
+        Some(SolidMesh {
+            label,
+            vertices,
+            indices,
+            volume,
+            surface_area,
+        })
     }
 }
 
@@ -632,6 +505,70 @@ fn per_vertex_bounds_dump(domain: Domain, ps: f64, pe: f64, ss: f64, se: f64, sf
 }
 
 // ---------------------------------------------------------------------------
+// Connected-component analysis on the reference surface's triangle adjacency
+// ---------------------------------------------------------------------------
+
+fn surface_domain_components(
+    surface: &TriSurface,
+    tri_indices: &[usize],
+) -> Vec<usize> {
+    let n = tri_indices.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut edge_to_tris: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (ci, &ti) in tri_indices.iter().enumerate() {
+        let tri = surface.triangle_indices(ti);
+        let edges = [
+            (tri[0].min(tri[1]), tri[0].max(tri[1])),
+            (tri[1].min(tri[2]), tri[1].max(tri[2])),
+            (tri[0].min(tri[2]), tri[0].max(tri[2])),
+        ];
+        for edge in &edges {
+            edge_to_tris.entry(*edge).or_default().push(ci);
+        }
+    }
+
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut rank: Vec<u8> = vec![0; n];
+
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+
+    fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra == rb {
+            return;
+        }
+        if rank[ra] < rank[rb] {
+            parent[ra] = rb;
+        } else {
+            parent[rb] = ra;
+            if rank[ra] == rank[rb] {
+                rank[ra] += 1;
+            }
+        }
+    }
+
+    for (_edge, tri_list) in &edge_to_tris {
+        for i in 0..tri_list.len() {
+            for j in (i + 1)..tri_list.len() {
+                union(&mut parent, &mut rank, tri_list[i], tri_list[j]);
+            }
+        }
+    }
+
+    (0..n).map(|i| find(&mut parent, i)).collect()
+}
+
+// ---------------------------------------------------------------------------
 // Main classifier entry point — mesh-based iteration via BVH
 // ---------------------------------------------------------------------------
 
@@ -663,8 +600,18 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
 
     let mut processed_surfaces: Vec<usize> = Vec::new();
 
+    #[derive(Clone)]
+    struct TriResult {
+        domain: Domain,
+        block_idx: Option<usize>,
+        top: [Vec3; 3],
+        bot_z: [f64; 3],
+    }
+
     for &si in &present_indices {
         let ref_surface = opt_surfaces[si].unwrap();
+
+        let mut tri_results: Vec<Vec<TriResult>> = vec![Vec::new(); ref_surface.num_triangles()];
 
         for ti in 0..ref_surface.num_triangles() {
             let tri = ref_surface.triangle(ti);
@@ -738,7 +685,6 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
             });
 
             for iv in &intervals {
-                let key = (iv.domain, block_idx);
                 let mut top = [Vec3::new(0.0, 0.0, 0.0); 3];
                 let mut bot_z = [0.0; 3];
                 let mut valid = true;
@@ -813,9 +759,41 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
                         Vec3::new(verts[2].x, verts[2].y, iv.upper),
                     ];
                     let bot_fallback = [iv.lower, iv.lower, iv.lower];
-                    builders.entry(key).or_insert_with(ShellBuilder::new).add_shell_face(top_fallback, bot_fallback);
+                    tri_results[ti].push(TriResult { domain: iv.domain, block_idx, top: top_fallback, bot_z: bot_fallback });
                 } else {
-                    builders.entry(key).or_insert_with(ShellBuilder::new).add_shell_face(top, bot_z);
+                    tri_results[ti].push(TriResult { domain: iv.domain, block_idx, top, bot_z });
+                }
+            }
+        }
+
+        // Pass 2: group by (domain, block_idx), find connected components
+        let mut domain_tris: HashMap<(Domain, Option<usize>), Vec<(usize, TriResult)>> = HashMap::new();
+        for (ti, results) in tri_results.iter().enumerate() {
+            for result in results {
+                domain_tris
+                    .entry((result.domain, result.block_idx))
+                    .or_default()
+                    .push((ti, result.clone()));
+            }
+        }
+
+        for ((domain, block_idx), entries) in domain_tris {
+            let tri_indices: Vec<usize> = entries.iter().map(|(ti, _)| *ti).collect();
+            let comp_ids = surface_domain_components(ref_surface, &tri_indices);
+
+            let mut comp_counts: HashMap<usize, usize> = HashMap::new();
+            for &cid in &comp_ids {
+                *comp_counts.entry(cid).or_insert(0) += 1;
+            }
+
+            let key = (domain, block_idx);
+            for (idx, (_ti, result)) in entries.iter().enumerate() {
+                let cid = comp_ids[idx];
+                if comp_counts[&cid] >= input.filter.min_triangles {
+                    builders
+                        .entry(key)
+                        .or_insert_with(ShellBuilder::new)
+                        .add_shell_face(result.top, result.bot_z);
                 }
             }
         }
@@ -823,8 +801,6 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
         processed_surfaces.push(si);
     }
 
-    // Convert builders into DomainSolids, splitting connected components
-    // and filtering each body independently before merging survivors.
     let mut domains: Vec<DomainSolid> = Vec::new();
     for ((domain, block_idx), builder) in builders {
         let block_name = block_idx.map(|i| input.boundaries[i].name.clone());
@@ -833,21 +809,28 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
             None => domain.label().to_string(),
         };
 
-        let bodies = builder.into_filtered_solids(label.clone(), &input.filter);
-        if bodies.is_empty() {
-            continue;
+        if let Some(solid) = builder.into_solid(label.clone()) {
+            let volume = solid.volume;
+            if volume < input.filter.min_volume_m3 {
+                continue;
+            }
+            let thickness = if solid.surface_area > 1e-9 {
+                volume / solid.surface_area
+            } else {
+                0.0
+            };
+            if thickness < input.filter.min_thickness_m {
+                continue;
+            }
+            domains.push(DomainSolid {
+                domain,
+                label,
+                color: domain.color().to_string(),
+                solid,
+                volume,
+                block_name,
+            });
         }
-        let volume: f64 = bodies.iter().map(|b| b.volume).sum();
-        let solid = merge_solid_bodies(bodies, label.clone());
-
-        domains.push(DomainSolid {
-            domain,
-            label,
-            color: domain.color().to_string(),
-            solid,
-            volume,
-            block_name,
-        });
     }
 
     // Summary
@@ -1071,6 +1054,7 @@ mod tests {
             filter: SliverFilter {
                 min_volume_m3: 0.01,
                 min_thickness_m: 0.001,
+                min_triangles: 0,
             },
             boundaries: &[],
         })
@@ -1408,6 +1392,7 @@ mod tests {
             filter: SliverFilter {
                 min_volume_m3: 0.5,
                 min_thickness_m: 0.05,
+                min_triangles: 0,
             },
             boundaries: &[],
         });
@@ -1467,6 +1452,7 @@ mod tests {
             filter: SliverFilter {
                 min_volume_m3: 0.01,
                 min_thickness_m: 0.001,
+                min_triangles: 0,
             },
             boundaries: &boundaries,
         });
@@ -1527,7 +1513,7 @@ mod tests {
             schedule_end: None,
             schedule_future: None,
             mode: Mode::Dig,
-            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001, min_triangles: 0 },
             boundaries: &[],
         });
 
@@ -1547,7 +1533,7 @@ mod tests {
             schedule_end: Some(&se),
             schedule_future: None,
             mode: Mode::Dig,
-            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001, min_triangles: 0 },
             boundaries: &[],
         });
 
@@ -1567,7 +1553,7 @@ mod tests {
             schedule_end: None,
             schedule_future: None,
             mode: Mode::Dump,
-            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001, min_triangles: 0 },
             boundaries: &[],
         });
 
@@ -1587,7 +1573,7 @@ mod tests {
             schedule_end: Some(&se),
             schedule_future: None,
             mode: Mode::Dump,
-            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001, min_triangles: 0 },
             boundaries: &[],
         });
 
@@ -1609,7 +1595,7 @@ mod tests {
             schedule_end: Some(&se),
             schedule_future: None,
             mode: Mode::Dig,
-            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001, min_triangles: 0 },
             boundaries: &[],
         });
 
@@ -1657,7 +1643,7 @@ mod tests {
             schedule_end: None,
             schedule_future: None,
             mode: Mode::Dig,
-            filter: SliverFilter { min_volume_m3: 1.0, min_thickness_m: 0.1 },
+            filter: SliverFilter { min_volume_m3: 1.0, min_thickness_m: 0.1, min_triangles: 0 },
             boundaries: &[],
         };
 
@@ -1680,7 +1666,7 @@ mod tests {
             schedule_end: Some(&se),
             schedule_future: Some(&sf),
             mode: Mode::Dig,
-            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001 },
+            filter: SliverFilter { min_volume_m3: 0.01, min_thickness_m: 0.001, min_triangles: 0 },
             boundaries: &[],
         };
 

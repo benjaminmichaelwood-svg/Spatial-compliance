@@ -83,11 +83,13 @@ export interface UploadedSurface {
 export interface Settings {
   minVolume: number;
   minThickness: number;
+  minTriangles: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   minVolume: 100.0,
   minThickness: 0.5,
+  minTriangles: 20,
 };
 
 export interface ObjectStyle {
