@@ -762,7 +762,11 @@ function SectionLineOverlay({
   onChangeRef.current = onChange;
   const onDragChangeRef = useRef(onDragChange);
   onDragChangeRef.current = onDragChange;
-  const { camera, gl } = useThree();
+  const onDrawCompleteRef = useRef(onDrawComplete);
+  onDrawCompleteRef.current = onDrawComplete;
+  const tempStartRef = useRef(tempStart);
+  tempStartRef.current = tempStart;
+  const { camera, gl, raycaster, scene } = useThree();
   const myRaycaster = useMemo(() => new THREE.Raycaster(), []);
   const groundPlane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 0, 1), -displayZ), [displayZ]);
 
@@ -770,6 +774,61 @@ function SectionLineOverlay({
     if (!isDrawing) setTempStart(null);
   }, [isDrawing]);
 
+  // Direct DOM click handler — bypasses R3F event propagation so surface
+  // meshes with stopPropagation() cannot block section point selection.
+  useEffect(() => {
+    if (!isDrawing) return;
+    const canvas = gl.domElement;
+    const prevCursor = canvas.style.cursor;
+    canvas.style.cursor = 'crosshair';
+
+    const onClick = (e: MouseEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      raycaster.setFromCamera(mouse, camera);
+
+      // Try hitting any visible mesh first (surfaces, domains)
+      const meshes: THREE.Mesh[] = [];
+      scene.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh && obj.visible) meshes.push(obj as THREE.Mesh);
+      });
+      raycaster.firstHitOnly = true;
+      const intersects = raycaster.intersectObjects(meshes, false);
+      raycaster.firstHitOnly = false;
+
+      let hitXY: [number, number] | null = null;
+      if (intersects.length > 0) {
+        const p = intersects[0].point;
+        hitXY = [p.x, p.y];
+      } else {
+        // Fallback: intersect the ground plane at displayZ
+        const pt = new THREE.Vector3();
+        const hit = raycaster.ray.intersectPlane(groundPlane, pt);
+        if (hit) hitXY = [pt.x, pt.y];
+      }
+
+      if (!hitXY) return;
+
+      if (!tempStartRef.current) {
+        setTempStart(hitXY);
+      } else {
+        onChangeRef.current([tempStartRef.current, hitXY]);
+        setTempStart(null);
+        onDrawCompleteRef.current();
+      }
+    };
+
+    canvas.addEventListener('click', onClick);
+    return () => {
+      canvas.style.cursor = prevCursor;
+      canvas.removeEventListener('click', onClick);
+    };
+  }, [isDrawing, gl, camera, raycaster, scene, groundPlane]);
+
+  // Endpoint drag handlers
   useEffect(() => {
     const canvas = gl.domElement;
     const getXY = (e: PointerEvent): [number, number] | null => {
@@ -805,31 +864,8 @@ function SectionLineOverlay({
     };
   }, [gl, camera, myRaycaster, groundPlane]);
 
-  const handlePlaneClick = useCallback(
-    (e: any) => {
-      if (!isDrawing) return;
-      e.stopPropagation();
-      const p = e.point;
-      if (!p) return;
-      if (!tempStart) {
-        setTempStart([p.x, p.y]);
-      } else {
-        onChange([tempStart, [p.x, p.y]]);
-        setTempStart(null);
-        onDrawComplete();
-      }
-    },
-    [isDrawing, tempStart, onChange, onDrawComplete],
-  );
-
   return (
     <>
-      {isDrawing && (
-        <mesh visible={false} onClick={handlePlaneClick} position={[0, 0, displayZ]}>
-          <planeGeometry args={[100000, 100000]} />
-          <meshBasicMaterial transparent opacity={0} />
-        </mesh>
-      )}
       {sectionLine && (
         <>
           <Line

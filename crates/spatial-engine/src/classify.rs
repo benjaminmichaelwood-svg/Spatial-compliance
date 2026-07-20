@@ -781,21 +781,66 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
             let tri_indices: Vec<usize> = entries.iter().map(|(ti, _)| *ti).collect();
             let comp_ids = surface_domain_components(ref_surface, &tri_indices);
 
-            let mut comp_counts: HashMap<usize, usize> = HashMap::new();
-            for &cid in &comp_ids {
-                *comp_counts.entry(cid).or_insert(0) += 1;
+            // Group entries by component id
+            let mut comp_entries: HashMap<usize, Vec<&TriResult>> = HashMap::new();
+            for (idx, (_ti, result)) in entries.iter().enumerate() {
+                comp_entries.entry(comp_ids[idx]).or_default().push(result);
             }
 
-            let key = (domain, block_idx);
-            for (idx, (_ti, result)) in entries.iter().enumerate() {
-                let cid = comp_ids[idx];
-                if comp_counts[&cid] >= input.filter.min_triangles {
-                    builders
-                        .entry(key)
-                        .or_insert_with(ShellBuilder::new)
-                        .add_shell_face(result.top, result.bot_z);
+            let domain_label = domain.label();
+            let total_comps = comp_entries.len();
+            let mut kept = 0usize;
+            let mut dropped_tri = 0usize;
+            let mut dropped_vol = 0usize;
+            let mut dropped_thick = 0usize;
+
+            for (_cid, comp_results) in &comp_entries {
+                if comp_results.len() < input.filter.min_triangles {
+                    dropped_tri += 1;
+                    continue;
+                }
+
+                // Build a temporary shell for this component to check volume/thickness
+                let mut comp_builder = ShellBuilder::new();
+                for result in comp_results {
+                    comp_builder.add_shell_face(result.top, result.bot_z);
+                }
+
+                if let Some(comp_solid) = comp_builder.into_solid(String::new()) {
+                    if comp_solid.volume < input.filter.min_volume_m3 {
+                        dropped_vol += 1;
+                        continue;
+                    }
+                    let thickness = if comp_solid.surface_area > 1e-9 {
+                        comp_solid.volume / comp_solid.surface_area
+                    } else {
+                        0.0
+                    };
+                    if thickness < input.filter.min_thickness_m {
+                        dropped_thick += 1;
+                        continue;
+                    }
+
+                    // Component passed all filters — add to the main builder
+                    kept += 1;
+                    let key = (domain, block_idx);
+                    let main_builder = builders.entry(key).or_insert_with(ShellBuilder::new);
+                    for result in comp_results {
+                        main_builder.add_shell_face(result.top, result.bot_z);
+                    }
+                } else {
+                    dropped_tri += 1;
                 }
             }
+
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(&format!(
+                "[SliverFilter] {} : {} components total, {} kept, {} dropped(tri<{}), {} dropped(vol<{}), {} dropped(thick<{})",
+                domain_label, total_comps, kept,
+                dropped_tri, input.filter.min_triangles,
+                dropped_vol, input.filter.min_volume_m3,
+                dropped_thick, input.filter.min_thickness_m,
+            ).into());
         }
 
         processed_surfaces.push(si);
@@ -811,17 +856,11 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
 
         if let Some(solid) = builder.into_solid(label.clone()) {
             let volume = solid.volume;
-            if volume < input.filter.min_volume_m3 {
-                continue;
-            }
-            let thickness = if solid.surface_area > 1e-9 {
-                volume / solid.surface_area
-            } else {
-                0.0
-            };
-            if thickness < input.filter.min_thickness_m {
-                continue;
-            }
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(&format!(
+                "[SliverFilter] Final solid '{}': volume={:.1} m³, area={:.1} m²",
+                label, volume, solid.surface_area,
+            ).into());
             domains.push(DomainSolid {
                 domain,
                 label,
