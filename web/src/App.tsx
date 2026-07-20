@@ -37,6 +37,7 @@ import type { ViewerHandle, SelectionInfo, MeasurePoint, SavedMeasurement } from
 import CrossSectionPanel from './components/CrossSectionPanel';
 import ReportPanel from './components/report/ReportPanel';
 import { computeCrossSection } from './utils/crossSection';
+import DomainLegend from './components/DomainLegend';
 
 
 function makeSampleUpload(z: number, name: string, role: SurfaceRole, fileName: string, size = 20): UploadedSurface {
@@ -362,6 +363,7 @@ export default function App() {
         setFlatDomains(flatResult.flatDomains);
         setResult(conformanceResult);
         setVisible(new Set<string>());
+        setSurfaceVisible(new Set<SurfaceRole>());
 
         if (flatResult.domainMaps) {
           const maps = new Map<SurfaceRole, Uint8Array>();
@@ -435,6 +437,7 @@ export default function App() {
         setFlatDomains(flat);
         setResult(res);
         setVisible(new Set(res.domains.map((d) => d.domain)));
+        setSurfaceVisible(new Set<SurfaceRole>());
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -639,22 +642,6 @@ export default function App() {
 
             <div className="mx-1 h-4 w-px bg-slate-700" />
 
-            {/* Perf overlay toggle */}
-            <button
-              type="button"
-              onClick={() => setShowPerf(p => !p)}
-              className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
-                showPerf ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
-              }`}
-              title="Toggle FPS/Memory"
-            >
-              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            </button>
-
-            <div className="mx-1 h-4 w-px bg-slate-700" />
-
             {/* Measure tools */}
             <div className="flex items-center gap-0.5 rounded bg-slate-800 p-0.5">
               <button
@@ -740,9 +727,6 @@ export default function App() {
             </button>
 
 
-            <span className="ml-2 text-[10px] text-slate-500">
-              {result.domains.length} solids
-            </span>
           </div>
         )}
       </header>
@@ -865,7 +849,22 @@ export default function App() {
                   style={{ display: mainTab === 'viewer' ? 'flex' : 'none' }}
                   className="h-full flex-col"
                 >
-                  <div className={crossSectionData ? 'h-[60%]' : 'h-full'} style={{ minHeight: 0 }}>
+                  <div className={`relative ${crossSectionData ? 'h-[60%]' : 'h-full'}`} style={{ minHeight: 0 }}>
+                    <DomainLegend
+                      domains={[...(() => {
+                        const grouped = new Map<string, { name: string; color: string; volume: number }>();
+                        for (const d of result.domains) {
+                          const existing = grouped.get(d.domain);
+                          if (existing) {
+                            existing.volume += d.volume;
+                          } else {
+                            grouped.set(d.domain, { name: d.label, color: d.color, volume: d.volume });
+                          }
+                        }
+                        return grouped.values();
+                      })()]}
+                      isDark={background === 'dark'}
+                    />
                     <Viewer
                       ref={viewerRef}
                       flatDomains={flatDomains}

@@ -156,20 +156,32 @@ async function main() {
 
   // 6. Enable thickness mode on a domain
   console.log('6. Testing thickness heatmap...');
+
+  // Capture console output from the diagnostic logging
+  const consoleLogs = [];
+  page.on('console', msg => {
+    const text = msg.text();
+    if (text.startsWith('THICKNESS') || text.startsWith('TARGET') || text.startsWith('DOMAIN MATCH')) {
+      consoleLogs.push(text);
+      console.log(`   [console] ${text}`);
+    }
+  });
+
   const domainLabels = ['Planned and Mined', 'Planned Not Mined'];
   let foundThickness = false;
 
   // Scroll sidebar to show Conformance Domains section
-  const sidebar = page.locator('.sidebar-section').first();
-  await sidebar.evaluate(el => el.scrollTop = el.scrollHeight);
+  await page.evaluate(() => {
+    const el = document.querySelector('.overflow-y-auto');
+    if (el) el.scrollTop = el.scrollHeight;
+  });
   await page.waitForTimeout(500);
 
   for (const label of domainLabels) {
-    // Find the domain row — the toggle button contains a div with the domain label text
+    // Find the domain toggle button
     const domainToggle = page.locator(`button:has(div:text-is("${label}"))`).first();
     if (!await domainToggle.isVisible({ timeout: 2000 }).catch(() => false)) {
-      console.log(`   "${label}" toggle not visible, scrolling...`);
-      // Try scrolling the whole page
+      console.log(`   "${label}" toggle not visible, scrolling more...`);
       await page.evaluate(() => {
         const el = document.querySelector('.overflow-y-auto');
         if (el) el.scrollTop = el.scrollHeight;
@@ -181,29 +193,35 @@ async function main() {
       }
     }
 
-    // Toggle domain visible first (domains default hidden after conformance)
+    // Toggle domain visible (domains default to hidden after conformance)
     await domainToggle.click();
     await page.waitForTimeout(1000);
     console.log(`   Toggled "${label}" visible`);
 
-    // Click the gear button next to this domain to expand style controls
-    // The gear is the sibling button with title="Style settings"
-    const domainRow = domainToggle.locator('xpath=ancestor::div[1]');
-    const gear = domainRow.locator('button[title="Style settings"]');
-    if (!await gear.isVisible({ timeout: 1000 }).catch(() => false)) {
+    // Click the gear button adjacent to this domain label using DOM traversal
+    const clickedGear = await page.evaluate((lbl) => {
+      const gears = document.querySelectorAll('button[title="Style settings"]');
+      for (const g of gears) {
+        const parent = g.parentElement;
+        if (parent && parent.textContent.includes(lbl)) {
+          g.click();
+          return true;
+        }
+      }
+      return false;
+    }, label);
+
+    if (!clickedGear) {
       console.log(`   No gear button found for "${label}"`);
       await domainToggle.click();
       continue;
     }
+    await page.waitForTimeout(1000);
 
-    await gear.click();
-    await page.waitForTimeout(500);
-
-    const thickCheck = page.locator('text="Colour by Thickness"');
-    if (!await thickCheck.isVisible({ timeout: 2000 }).catch(() => false)) {
+    // Look for thickness checkbox
+    const thickLabel = page.locator('text="Colour by Thickness"');
+    if (!await thickLabel.isVisible({ timeout: 2000 }).catch(() => false)) {
       console.log(`   No thickness controls found for "${label}"`);
-      await gear.click();
-      await page.waitForTimeout(300);
       await domainToggle.click();
       continue;
     }
@@ -214,11 +232,21 @@ async function main() {
     // Enable thickness
     const cb = page.locator('label:has-text("Colour by Thickness") input[type="checkbox"]');
     await cb.click();
-    await page.waitForTimeout(2000);
-    await page.screenshot({ path: `${SHOTS}/04-thickness-on.png` });
-    console.log('   04-thickness-on.png');
+    await page.waitForTimeout(3000);
 
-    // Stats
+    // Iso view thickness screenshot
+    await page.locator('button[title="Fit All"]').click();
+    await page.waitForTimeout(2000);
+    await page.screenshot({ path: `${SHOTS}/04-thickness-iso.png` });
+    console.log('   04-thickness-iso.png');
+
+    // Plan view thickness screenshot
+    await page.locator('button[title="Plan"]').click();
+    await page.waitForTimeout(2000);
+    await page.screenshot({ path: `${SHOTS}/05-thickness-plan.png` });
+    console.log('   05-thickness-plan.png');
+
+    // Stats line
     const stats = await page.locator('text=/Min.*Max/').first().textContent().catch(() => 'n/a');
     console.log(`   Stats: ${stats}`);
 
@@ -226,12 +254,14 @@ async function main() {
     const preset = page.locator('button:has-text("0–20m")');
     if (await preset.isVisible({ timeout: 500 }).catch(() => false)) {
       await preset.click();
-      await page.waitForTimeout(1000);
-      await page.screenshot({ path: `${SHOTS}/05-thickness-0-20m.png` });
-      console.log('   05-thickness-0-20m.png');
+      await page.waitForTimeout(2000);
+      await page.locator('button[title="Fit All"]').click();
+      await page.waitForTimeout(2000);
+      await page.screenshot({ path: `${SHOTS}/06-thickness-0-20m.png` });
+      console.log('   06-thickness-0-20m.png');
     }
 
-    // Toggle off thickness and domain
+    // Toggle off thickness
     await cb.click();
     await page.waitForTimeout(500);
     await domainToggle.click();
@@ -241,6 +271,13 @@ async function main() {
 
   if (!foundThickness) {
     console.log('   WARNING: No thickness controls found (may need scrolling or thicknessMaps empty)');
+  }
+
+  // Print all captured console logs
+  if (consoleLogs.length > 0) {
+    console.log(`   Captured ${consoleLogs.length} diagnostic messages`);
+  } else {
+    console.log('   WARNING: No THICKNESS diagnostic logs captured');
   }
 
   // 7. Toggle a domain solid on and capture from multiple angles
