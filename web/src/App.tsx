@@ -539,6 +539,23 @@ export default function App() {
     return computeCrossSection(uploads, result.domains, sectionLine[0], sectionLine[1]);
   }, [sectionLine, uploads, result]);
 
+  const pitBounds = useMemo(() => {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    let found = false;
+    for (const upload of uploads.values()) {
+      for (let i = 0; i < upload.vertexCount; i++) {
+        const x = upload.positions[i * 3];
+        const y = upload.positions[i * 3 + 1];
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        found = true;
+      }
+    }
+    return found ? { minX, maxX, minY, maxY } : null;
+  }, [uploads]);
+
   const handleCapture = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -699,7 +716,7 @@ export default function App() {
                 onClick={handleClearSection}
                 className="rounded px-2 py-1 text-[10px] font-medium text-amber-400 hover:bg-slate-700"
               >
-                Clear Section
+                ✂ Clear Section
               </button>
             ) : (
               <button
@@ -708,9 +725,7 @@ export default function App() {
                 className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white"
                 title="Cross Section"
               >
-                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
-                </svg>
+                ✂ Section
               </button>
             )}
 
@@ -849,57 +864,69 @@ export default function App() {
                   style={{ display: mainTab === 'viewer' ? 'flex' : 'none' }}
                   className="h-full flex-col"
                 >
-                  <div className={`relative ${crossSectionData ? 'h-[60%]' : 'h-full'}`} style={{ minHeight: 0 }}>
-                    <DomainLegend
-                      domains={[...(() => {
-                        const grouped = new Map<string, { name: string; color: string; volume: number }>();
-                        for (const d of result.domains) {
-                          const existing = grouped.get(d.domain);
-                          if (existing) {
-                            existing.volume += d.volume;
-                          } else {
-                            grouped.set(d.domain, { name: d.label, color: d.color, volume: d.volume });
+                  {crossSectionData && sectionLine ? (
+                    <div className="relative h-full" style={{ minHeight: 0 }}>
+                      <CrossSectionPanel
+                        data={crossSectionData}
+                        onClose={handleClearSection}
+                        surfaceVisible={surfaceVisible}
+                        domainVisible={visible}
+                        domainStyles={domainStyles}
+                        surfaceStyles={surfaceStyles}
+                        sectionLine={sectionLine}
+                        pitBounds={pitBounds}
+                        onSelectProfile={(role) => setSelectedId(`surface:${role}`)}
+                        onSelectSolid={(domain) => setSelectedId(`domain:${domain}`)}
+                      />
+                    </div>
+                  ) : (
+                    <div className="relative h-full" style={{ minHeight: 0 }}>
+                      <DomainLegend
+                        domains={[...(() => {
+                          const grouped = new Map<string, { name: string; color: string; volume: number }>();
+                          for (const d of result.domains) {
+                            const existing = grouped.get(d.domain);
+                            if (existing) {
+                              existing.volume += d.volume;
+                            } else {
+                              grouped.set(d.domain, { name: d.label, color: d.color, volume: d.volume });
+                            }
                           }
-                        }
-                        return grouped.values();
-                      })()]}
-                      isDark={background === 'dark'}
-                    />
-                    <Viewer
-                      ref={viewerRef}
-                      flatDomains={flatDomains}
-                      visible={visible}
-                      canvasRef={canvasRef}
-                      boundaries={boundaries}
-                      isDrawing={isDrawing}
-                      drawPoints={drawPoints}
-                      onAddDrawPoint={handleAddDrawPoint}
-                      onFinishDrawing={finishDrawing}
-                      uploads={uploads}
-                      surfaceVisible={surfaceVisible}
-                      isDrawingSection={isDrawingSection}
-                      sectionLine={sectionLine}
-                      onSectionLineChange={setSectionLine}
-                      onSectionDrawComplete={handleSectionDrawComplete}
-                      background={background}
-                      domainStyles={domainStyles}
-                      surfaceStyles={surfaceStyles}
-                      selectedId={selectedId}
-                      onSelect={handleSelect}
-                      measureTool={measureTool}
-                      measurePoints={measurePoints}
-                      onAddMeasurePoint={handleAddMeasurePoint}
-                      savedMeasurements={savedMeasurements}
-                      showPerf={showPerf}
-                      domainMaps={domainMaps}
-                      thicknessMaps={thicknessMaps}
+                          return grouped.values();
+                        })()]}
+                        isDark={background === 'dark'}
+                      />
+                      <Viewer
+                        ref={viewerRef}
+                        flatDomains={flatDomains}
+                        visible={visible}
+                        canvasRef={canvasRef}
+                        boundaries={boundaries}
+                        isDrawing={isDrawing}
+                        drawPoints={drawPoints}
+                        onAddDrawPoint={handleAddDrawPoint}
+                        onFinishDrawing={finishDrawing}
+                        uploads={uploads}
+                        surfaceVisible={surfaceVisible}
+                        isDrawingSection={isDrawingSection}
+                        sectionLine={sectionLine}
+                        onSectionLineChange={setSectionLine}
+                        onSectionDrawComplete={handleSectionDrawComplete}
+                        background={background}
+                        domainStyles={domainStyles}
+                        surfaceStyles={surfaceStyles}
+                        selectedId={selectedId}
+                        onSelect={handleSelect}
+                        measureTool={measureTool}
+                        measurePoints={measurePoints}
+                        onAddMeasurePoint={handleAddMeasurePoint}
+                        savedMeasurements={savedMeasurements}
+                        showPerf={showPerf}
+                        domainMaps={domainMaps}
+                        thicknessMaps={thicknessMaps}
 
-                      thicknessMode={thicknessMode}
-                    />
-                  </div>
-                  {crossSectionData && (
-                    <div className="h-[40%] border-t border-slate-600" style={{ minHeight: 0 }}>
-                      <CrossSectionPanel data={crossSectionData} onClose={handleClearSection} />
+                        thicknessMode={thicknessMode}
+                      />
                     </div>
                   )}
                 </div>
