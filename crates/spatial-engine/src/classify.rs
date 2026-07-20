@@ -318,6 +318,19 @@ impl ShellBuilder {
             let volume = compute_signed_volume(&vertices, &indices).abs();
             let surface_area = compute_surface_area(&vertices, &indices);
 
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(&format!(
+                "BODY: domain={} tris={} vol={:.1}m³ thickness={:.2}m area={:.1}m² VERDICT={}",
+                label,
+                local_tris.len(),
+                volume,
+                if surface_area > 1e-9 { volume / surface_area } else { 0.0 },
+                surface_area,
+                if volume < filter.min_volume_m3 { "FILTERED(vol)" }
+                else if (if surface_area > 1e-9 { volume / surface_area } else { 0.0 }) < filter.min_thickness_m { "FILTERED(thick)" }
+                else { "KEPT" }
+            ).into());
+
             // Filter
             if volume < filter.min_volume_m3 {
                 continue;
