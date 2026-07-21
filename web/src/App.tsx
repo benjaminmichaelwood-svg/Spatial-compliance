@@ -46,14 +46,22 @@ function makeSampleUpload(z: number, name: string, role: SurfaceRole, fileName: 
   return { role, fileName, name, positions, indices, vertexCount: 4, triangleCount: 2 };
 }
 
-function flatDomainToLightDomainSolid(d: FlatDomainSolid): DomainSolid {
+function flatDomainToDomainSolid(d: FlatDomainSolid): DomainSolid {
+  const vertices: Vec3[] = [];
+  for (let i = 0; i < d.vertexCount; i++) {
+    vertices.push({ x: d.positions[i * 3], y: d.positions[i * 3 + 1], z: d.positions[i * 3 + 2] });
+  }
+  const indices: [number, number, number][] = [];
+  for (let i = 0; i < d.triangleCount; i++) {
+    indices.push([d.indices[i * 3], d.indices[i * 3 + 1], d.indices[i * 3 + 2]]);
+  }
   return {
     domain: d.domain,
     label: d.label,
     color: d.color,
     volume: d.volume,
     block_name: d.block_name,
-    solid: { label: d.label, vertices: [], indices: [], volume: d.volume, surface_area: d.surface_area },
+    solid: { label: d.label, vertices, indices, volume: d.volume, surface_area: d.surface_area },
   };
 }
 
@@ -353,7 +361,7 @@ export default function App() {
           (phase, value) => setProgress({ phase, value }),
         );
 
-        const domainSolids = flatResult.flatDomains.map(flatDomainToLightDomainSolid);
+        const domainSolids = flatResult.flatDomains.map(flatDomainToDomainSolid);
         const conformanceResult: ConformanceResult = {
           mode: flatResult.mode,
           domains: domainSolids,
@@ -534,6 +542,20 @@ export default function App() {
     setIsDrawingSection(false);
   }, []);
 
+  const handleStepSection = useCallback((offset: number) => {
+    setSectionLine(prev => {
+      if (!prev) return prev;
+      const [[x1, y1], [x2, y2]] = prev;
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len < 1e-6) return prev;
+      const nx = -dy / len * offset;
+      const ny = dx / len * offset;
+      return [[x1 + nx, y1 + ny], [x2 + nx, y2 + ny]];
+    });
+  }, []);
+
   const crossSectionData = useMemo(() => {
     if (!sectionLine || !result) return null;
     return computeCrossSection(uploads, result.domains, sectionLine[0], sectionLine[1]);
@@ -667,10 +689,11 @@ export default function App() {
                 className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
                   measureTool === 'distance' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
                 }`}
-                title="Measure distance"
+                title="Measure distance (click two points)"
               >
                 <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 21l18-18M3 21h5v-5M21 3h-5v5" />
+                  <path strokeLinecap="round" d="M8 16l2-2M12 12l2-2M16 8l-2 2" />
                 </svg>
               </button>
               <button
@@ -877,6 +900,7 @@ export default function App() {
                         pitBounds={pitBounds}
                         onSelectProfile={(role) => setSelectedId(`surface:${role}`)}
                         onSelectSolid={(domain) => setSelectedId(`domain:${domain}`)}
+                        onStepSection={handleStepSection}
                       />
                     </div>
                   ) : (

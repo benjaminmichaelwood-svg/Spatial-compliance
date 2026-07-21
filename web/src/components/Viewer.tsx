@@ -283,8 +283,9 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
       matRef.current.opacity = style.opacity;
       matRef.current.transparent = style.opacity < 1;
     }
+    matRef.current.wireframe = style.wireframe;
     matRef.current.needsUpdate = true;
-  }, [style.color, style.opacity, selected, highlighted, isPainted]);
+  }, [style.color, style.opacity, style.wireframe, selected, highlighted, isPainted]);
 
   const roleLabel = SURFACE_ROLES.find((r) => r.key === upload.role)?.label ?? upload.role;
   const id = `surface-${upload.role}`;
@@ -351,6 +352,7 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
           side={THREE.DoubleSide}
           flatShading={false}
           shininess={isPainted ? 15 : 10}
+          wireframe={style.wireframe}
           polygonOffset={isPainted}
           polygonOffsetFactor={isPainted ? -1 : 0}
           polygonOffsetUnits={isPainted ? -1 : 0}
@@ -435,8 +437,9 @@ function BatchedDomainGroup({
     matRef.current.color.copy(c);
     matRef.current.opacity = style.opacity;
     matRef.current.transparent = style.opacity < 1;
+    matRef.current.wireframe = style.wireframe;
     matRef.current.needsUpdate = true;
-  }, [style.color, style.opacity, selected, highlighted]);
+  }, [style.color, style.opacity, style.wireframe, selected, highlighted]);
 
   const findSolid = useCallback((faceIndex: number) => {
     for (const range of triRanges) {
@@ -506,6 +509,7 @@ function BatchedDomainGroup({
           side={THREE.DoubleSide}
           flatShading={false}
           shininess={10}
+          wireframe={style.wireframe}
         />
       </mesh>
       {edgesGeo && (
@@ -626,16 +630,64 @@ function ViewPresetController({ preset, flatDomains, uploads, onDone }: ViewPres
   return null;
 }
 
+function computeMeasureMetrics(p1: THREE.Vector3, p2: THREE.Vector3) {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const dz = p2.z - p1.z;
+  const dist3d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  const planLen = Math.sqrt(dx * dx + dy * dy);
+  const bearingRad = Math.atan2(dx, dy);
+  let bearingDeg = bearingRad * (180 / Math.PI);
+  if (bearingDeg < 0) bearingDeg += 360;
+  const grade = planLen > 0.001 ? (dz / planLen) * 100 : 0;
+  return { dist3d, planLen, dz, bearingDeg, grade };
+}
+
+function MeasureCursorTracker({ active, onMove }: {
+  active: boolean;
+  onMove: (pos: { world: THREE.Vector3; screenX: number; screenY: number } | null) => void;
+}) {
+  const { scene, camera, gl } = useThree();
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+
+  useEffect(() => {
+    if (!active) { onMove(null); return; }
+    const canvas = gl.domElement;
+    const handleMouseMove = (e: MouseEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      raycaster.setFromCamera(ndc, camera);
+      const meshes: THREE.Mesh[] = [];
+      scene.traverse((obj) => { if (obj instanceof THREE.Mesh && obj.visible) meshes.push(obj); });
+      const hits = raycaster.intersectObjects(meshes, false);
+      if (hits.length > 0) {
+        onMove({ world: hits[0].point.clone(), screenX: e.clientX, screenY: e.clientY });
+      } else {
+        onMove(null);
+      }
+    };
+    canvas.addEventListener('mousemove', handleMouseMove);
+    return () => canvas.removeEventListener('mousemove', handleMouseMove);
+  }, [active, scene, camera, gl, raycaster, onMove]);
+
+  return null;
+}
+
 function MeasureOverlay3D({
   points,
   tool,
   savedMeasurements,
   sphereRadius,
+  liveCursorPos,
 }: {
   points: MeasurePoint[];
   tool: MeasureTool;
   savedMeasurements: SavedMeasurement[];
   sphereRadius: number;
+  liveCursorPos?: THREE.Vector3 | null;
 }) {
   const markerR = sphereRadius * 0.5;
 
@@ -658,6 +710,26 @@ function MeasureOverlay3D({
           </mesh>
         </group>
       ))}
+
+      {tool === 'distance' && points.length === 1 && liveCursorPos && (
+        <group>
+          <Line
+            points={[
+              [points[0].position.x, points[0].position.y, points[0].position.z],
+              [liveCursorPos.x, liveCursorPos.y, liveCursorPos.z],
+            ]}
+            color="#22d3ee"
+            lineWidth={1.5}
+            dashed
+            dashSize={sphereRadius * 2}
+            gapSize={sphereRadius}
+          />
+          <mesh position={points[0].position}>
+            <sphereGeometry args={[markerR, 12, 12]} />
+            <meshBasicMaterial color="#22d3ee" />
+          </mesh>
+        </group>
+      )}
 
       {tool !== 'none' && points.length > 0 && (() => {
         const linePoints: [number, number, number][] = points.map(p => [p.position.x, p.position.y, p.position.z]);
@@ -1089,7 +1161,7 @@ function MeasureLabelsProjector({
         x: (mid.x * 0.5 + 0.5) * rect.width,
         y: (-mid.y * 0.5 + 0.5) * rect.height,
         text: `${m.distance.toFixed(2)} m`,
-        dz: `${String.fromCharCode(0x0394)}Z: ${Math.abs(m.p2.z - m.p1.z).toFixed(2)} m`,
+        dz: `ΔZ: ${(m.p2.z - m.p1.z) >= 0 ? '+' : ''}${(m.p2.z - m.p1.z).toFixed(2)} m · Plan: ${Math.sqrt((m.p2.x-m.p1.x)**2+(m.p2.y-m.p1.y)**2).toFixed(2)} m`,
       };
     });
     const json = JSON.stringify(labels.map(l => [l.x | 0, l.y | 0]));
@@ -1188,6 +1260,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   const [isDraggingEndpoint, setIsDraggingEndpoint] = useState(false);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [cursorElev, setCursorElev] = useState<{ x: number; y: number; z: number } | null>(null);
+  const [liveMeasurePos, setLiveMeasurePos] = useState<{ world: THREE.Vector3; screenX: number; screenY: number } | null>(null);
   const [viewPreset, setViewPreset] = useState<ViewPreset | null>(null);
   const [measureLabels, setMeasureLabels] = useState<{ id: number; x: number; y: number; text: string; dz: string }[]>([]);
   const [pivotMode, setPivotMode] = useState(false);
@@ -1375,7 +1448,8 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
         <BoundaryLines boundaries={boundaries} displayZ={displayZ} />
         <DrawingLayer points={drawPoints} isDrawing={isDrawing} onAddPoint={onAddDrawPoint} onFinish={onFinishDrawing} displayZ={displayZ} sphereRadius={sphereRadius} />
 
-        <MeasureOverlay3D points={measurePoints} tool={measureTool} savedMeasurements={savedMeasurements} sphereRadius={sphereRadius} />
+        <MeasureOverlay3D points={measurePoints} tool={measureTool} savedMeasurements={savedMeasurements} sphereRadius={sphereRadius} liveCursorPos={liveMeasurePos?.world} />
+        <MeasureCursorTracker active={measureTool === 'distance' && measurePoints.length === 1} onMove={setLiveMeasurePos} />
 
         {measureTool !== 'none' && (
           <mesh visible={false} onClick={handleCanvasClick} position={[0, 0, displayZ]}>
@@ -1508,11 +1582,33 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
       )}
       {measureTool !== 'none' && (
         <div className="absolute left-3 top-3 rounded bg-cyan-600/90 px-3 py-1.5 text-xs font-medium text-white shadow">
-          {measureTool === 'distance' && (measurePoints.length === 0 ? 'Click first point to measure distance' : 'Click second point to complete measurement')}
+          {measureTool === 'distance' && measurePoints.length === 0 && 'Click first point to measure distance'}
+          {measureTool === 'distance' && measurePoints.length === 1 && !liveMeasurePos && 'Move cursor over surface...'}
           {measureTool === 'elevation' && 'Hover over surfaces to read elevation'}
           {measureTool === 'area' && `Click points to define area · ${measurePoints.length} placed · Press Enter to close`}
         </div>
       )}
+      {measureTool === 'distance' && measurePoints.length === 1 && liveMeasurePos && (() => {
+        const m = computeMeasureMetrics(measurePoints[0].position, liveMeasurePos.world);
+        return (
+          <div
+            className="pointer-events-none absolute z-50 rounded bg-slate-900/95 px-3 py-2 text-[11px] text-white shadow-lg border border-cyan-500/40"
+            style={{ left: liveMeasurePos.screenX + 16, top: liveMeasurePos.screenY - 80 }}
+          >
+            <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+              <span className="text-cyan-300">Distance:</span><span className="font-mono">{m.dist3d.toFixed(2)} m</span>
+              <span className="text-cyan-300">Plan:</span><span className="font-mono">{m.planLen.toFixed(2)} m</span>
+              <span className="text-cyan-300">dZ:</span><span className="font-mono">{m.dz >= 0 ? '+' : ''}{m.dz.toFixed(2)} m</span>
+              <span className="text-cyan-300">Bearing:</span><span className="font-mono">{m.bearingDeg.toFixed(1)}°</span>
+              <span className="text-cyan-300">Grade:</span><span className="font-mono">{m.grade >= 0 ? '+' : ''}{m.grade.toFixed(1)}%</span>
+            </div>
+            <div className="mt-1 text-[9px] text-slate-400 font-mono">
+              E {liveMeasurePos.world.x.toFixed(1)} N {liveMeasurePos.world.y.toFixed(1)} RL {liveMeasurePos.world.z.toFixed(1)}
+            </div>
+            <div className="mt-0.5 text-[9px] text-cyan-400">Click to lock measurement</div>
+          </div>
+        );
+      })()}
     </div>
   );
 });

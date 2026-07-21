@@ -13,6 +13,7 @@ interface Props {
   pitBounds: { minX: number; maxX: number; minY: number; maxY: number } | null;
   onSelectProfile?: (role: SurfaceRole) => void;
   onSelectSolid?: (domain: string) => void;
+  onStepSection?: (offset: number) => void;
 }
 
 interface ViewBox {
@@ -54,6 +55,7 @@ export default function CrossSectionPanel({
   pitBounds,
   onSelectProfile,
   onSelectSolid,
+  onStepSection,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -124,18 +126,14 @@ export default function CrossSectionPanel({
     return zScale / dScale;
   }, [view, plotW, plotH]);
 
-  // Filter profiles and solids by visibility
+  // Filter profiles and solids by local checkbox state only
   const visibleProfiles = useMemo(() => {
-    return data.profiles.filter(
-      p => surfaceVisible.has(p.role) && !hiddenProfiles.has(p.role),
-    );
-  }, [data.profiles, surfaceVisible, hiddenProfiles]);
+    return data.profiles.filter(p => !hiddenProfiles.has(p.role));
+  }, [data.profiles, hiddenProfiles]);
 
   const visibleSolids = useMemo(() => {
-    return data.solids.filter(
-      s => domainVisible.has(s.domain) && !hiddenSolids.has(s.domain),
-    );
-  }, [data.solids, domainVisible, hiddenSolids]);
+    return data.solids.filter(s => !hiddenSolids.has(s.domain));
+  }, [data.solids, hiddenSolids]);
 
   // Unique domains for legend
   const uniqueDomains = useMemo(() => {
@@ -363,6 +361,35 @@ export default function CrossSectionPanel({
     ctx.lineWidth = 1;
     ctx.strokeRect(mapX(minX), mapY(maxY), rangeX * scale, rangeY * scale);
 
+    // Draw surface intersection trace on plan overview
+    const [sl1, sl2] = sectionLine;
+    const sdx = sl2[0] - sl1[0];
+    const sdy = sl2[1] - sl1[1];
+    const sLen = Math.sqrt(sdx * sdx + sdy * sdy);
+    if (sLen > 1e-6) {
+      const dirX = sdx / sLen;
+      const dirY = sdy / sLen;
+      for (const pr of data.profiles) {
+        if (pr.points.length < 2) continue;
+        const pStyle = surfaceStyles.get(pr.role);
+        const pColor = pStyle?.color || pr.color;
+        ctx.strokeStyle = pColor;
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        const fx = sl1[0] + pr.points[0].dist * dirX;
+        const fy = sl1[1] + pr.points[0].dist * dirY;
+        ctx.moveTo(mapX(fx), mapY(fy));
+        for (let i = 1; i < pr.points.length; i++) {
+          const px = sl1[0] + pr.points[i].dist * dirX;
+          const py = sl1[1] + pr.points[i].dist * dirY;
+          ctx.lineTo(mapX(px), mapY(py));
+        }
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+
     // Section line
     const [p1, p2] = sectionLine;
     ctx.strokeStyle = '#facc15';
@@ -403,14 +430,25 @@ export default function CrossSectionPanel({
     ctx.strokeStyle = '#334155';
     ctx.lineWidth = 1;
     ctx.strokeRect(0, 0, cw, ch);
-  }, [pitBounds, sectionLine]);
+  }, [pitBounds, sectionLine, data.profiles, surfaceStyles]);
 
   // Interactions
   const dragRef = useRef<{ sx: number; sy: number; sv: ViewBox } | null>(null);
 
+  const stepSize = useMemo(() => {
+    if (!pitBounds) return 50;
+    const range = Math.max(pitBounds.maxX - pitBounds.minX, pitBounds.maxY - pitBounds.minY);
+    return Math.max(10, Math.round(range / 50));
+  }, [pitBounds]);
+
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       e.preventDefault();
+      if (e.ctrlKey && onStepSection) {
+        const dir = e.deltaY > 0 ? 1 : -1;
+        onStepSection(dir * stepSize);
+        return;
+      }
       const rect = canvasRef.current?.getBoundingClientRect();
       if (!rect || plotW <= 0 || plotH <= 0) return;
       const cx = e.clientX - rect.left;
@@ -425,7 +463,7 @@ export default function CrossSectionPanel({
         maxZ: z + (v.maxZ - z) * f,
       }));
     },
-    [view, plotW, plotH],
+    [view, plotW, plotH, onStepSection, stepSize],
   );
 
   const handleMouseDown = useCallback(
@@ -496,6 +534,28 @@ export default function CrossSectionPanel({
           ) : null}
         </div>
         <div className="flex items-center gap-1">
+          {onStepSection && (
+            <>
+              <button
+                type="button"
+                onClick={() => onStepSection(-stepSize)}
+                className="rounded px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-700 hover:text-white"
+                title={`Step back ${stepSize}m`}
+              >
+                ◀
+              </button>
+              <span className="text-[9px] text-slate-500">{stepSize}m</span>
+              <button
+                type="button"
+                onClick={() => onStepSection(stepSize)}
+                className="rounded px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-700 hover:text-white"
+                title={`Step forward ${stepSize}m`}
+              >
+                ▶
+              </button>
+              <div className="mx-1 h-3 w-px bg-slate-600" />
+            </>
+          )}
           <button
             type="button"
             onClick={() => setView(bounds)}
@@ -546,7 +606,7 @@ export default function CrossSectionPanel({
           {data.profiles.map(p => {
             const style = surfaceStyles.get(p.role);
             const color = style?.color || p.color;
-            const isVis = surfaceVisible.has(p.role) && !hiddenProfiles.has(p.role);
+            const isVis = !hiddenProfiles.has(p.role);
             const lineStyle = getLineStyle(p.role);
             return (
               <label
@@ -587,7 +647,7 @@ export default function CrossSectionPanel({
               {uniqueDomains.map(s => {
                 const style = domainStyles.get(s.domain);
                 const color = style?.color || s.color;
-                const isVis = domainVisible.has(s.domain) && !hiddenSolids.has(s.domain);
+                const isVis = !hiddenSolids.has(s.domain);
                 return (
                   <label
                     key={s.domain}
