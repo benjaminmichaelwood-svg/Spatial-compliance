@@ -635,8 +635,9 @@ function computeMeasureMetrics(p1: THREE.Vector3, p2: THREE.Vector3) {
   const bearingRad = Math.atan2(dx, dy);
   let bearingDeg = bearingRad * (180 / Math.PI);
   if (bearingDeg < 0) bearingDeg += 360;
-  const grade = planLen > 0.001 ? (dz / planLen) * 100 : 0;
-  return { dist3d, planLen, dz, bearingDeg, grade };
+  const gradePercent = planLen > 0.001 ? (dz / planLen) * 100 : 0;
+  const gradeDeg = planLen > 0.001 ? Math.atan2(Math.abs(dz), planLen) * (180 / Math.PI) : 0;
+  return { dist3d, planLen, dz, bearingDeg, gradePercent, gradeDeg };
 }
 
 function MeasureCursorTracker({ active, onMove }: {
@@ -1619,15 +1620,15 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
             className="pointer-events-none absolute z-50 rounded bg-slate-900/95 px-3 py-2 text-[11px] text-white shadow-lg border border-cyan-500/40"
             style={{ left: liveMeasurePos.screenX + 16, top: liveMeasurePos.screenY - 80 }}
           >
-            <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
-              <span className="text-cyan-300">Distance:</span><span className="font-mono">{m.dist3d.toFixed(2)} m</span>
-              <span className="text-cyan-300">Plan:</span><span className="font-mono">{m.planLen.toFixed(2)} m</span>
-              <span className="text-cyan-300">dZ:</span><span className="font-mono">{m.dz >= 0 ? '+' : ''}{m.dz.toFixed(2)} m</span>
-              <span className="text-cyan-300">Bearing:</span><span className="font-mono">{m.bearingDeg.toFixed(1)}°</span>
-              <span className="text-cyan-300">Grade:</span><span className="font-mono">{m.grade >= 0 ? '+' : ''}{m.grade.toFixed(1)}%</span>
+            <div className="mb-1 text-[10px] text-slate-400 font-mono">
+              ({liveMeasurePos.world.x.toFixed(2)}; {liveMeasurePos.world.y.toFixed(2)}; {liveMeasurePos.world.z.toFixed(2)})
             </div>
-            <div className="mt-1 text-[9px] text-slate-400 font-mono">
-              E {liveMeasurePos.world.x.toFixed(1)} N {liveMeasurePos.world.y.toFixed(1)} RL {liveMeasurePos.world.z.toFixed(1)}
+            <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+              <span className="text-cyan-300">Length:</span><span className="font-mono">{m.dist3d.toFixed(2)}</span>
+              <span className="text-cyan-300">Plan Length:</span><span className="font-mono">{m.planLen.toFixed(2)}</span>
+              <span className="text-cyan-300">dZ:</span><span className="font-mono">{m.dz >= 0 ? '+' : ''}{m.dz.toFixed(2)}</span>
+              <span className="text-cyan-300">Bearing:</span><span className="font-mono">{m.bearingDeg.toFixed(1)}°</span>
+              <span className="text-cyan-300">Grade:</span><span className="font-mono">{m.gradeDeg.toFixed(1)}° ({Math.abs(m.gradePercent).toFixed(1)}%)</span>
             </div>
             <div className="mt-0.5 text-[9px] text-cyan-400">Click to lock measurement</div>
           </div>

@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import type { CrossSectionData, SurfaceProfile, SolidSection } from '../utils/crossSection';
-import type { SurfaceRole } from '../types';
+import type { SurfaceRole, UploadedSurface } from '../types';
 
 interface Props {
   data: CrossSectionData;
@@ -12,6 +12,7 @@ interface Props {
   sectionLine: [[number, number], [number, number]];
   pitBounds: { minX: number; maxX: number; minY: number; maxY: number } | null;
   pitOutlineEdges?: [number, number, number, number][];
+  uploads?: Map<SurfaceRole, UploadedSurface>;
   onSelectProfile?: (role: SurfaceRole) => void;
   onSelectSolid?: (domain: string) => void;
   onStepSection?: (offset: number) => void;
@@ -55,6 +56,7 @@ export default function CrossSectionPanel({
   sectionLine,
   pitBounds,
   pitOutlineEdges,
+  uploads: uploadsForOverview,
   onSelectProfile,
   onSelectSolid,
   onStepSection,
@@ -358,20 +360,44 @@ export default function CrossSectionPanel({
       ctx.stroke();
     }
 
+    // Draw filled surface footprints
+    const surfaceColors: Record<string, string> = {
+      production_start: '#94a3b8',
+      production_end: '#64748b',
+      schedule_start: '#7dd3fc',
+      schedule_end: '#38bdf8',
+      schedule_future: '#a78bfa',
+    };
+    if (uploadsForOverview && uploadsForOverview.size > 0) {
+      for (const [role, upload] of uploadsForOverview) {
+        const pStyle = surfaceStyles.get(role);
+        const color = pStyle?.color || surfaceColors[role] || '#64748b';
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.15;
+        const step = Math.max(1, Math.floor(upload.triangleCount / 8000));
+        ctx.beginPath();
+        for (let t = 0; t < upload.triangleCount; t += step) {
+          const i0 = upload.indices[t * 3], i1 = upload.indices[t * 3 + 1], i2 = upload.indices[t * 3 + 2];
+          ctx.moveTo(mapX(upload.positions[i0 * 3]), mapY(upload.positions[i0 * 3 + 1]));
+          ctx.lineTo(mapX(upload.positions[i1 * 3]), mapY(upload.positions[i1 * 3 + 1]));
+          ctx.lineTo(mapX(upload.positions[i2 * 3]), mapY(upload.positions[i2 * 3 + 1]));
+          ctx.closePath();
+        }
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+
     // Pit outline from boundary edges
     if (pitOutlineEdges && pitOutlineEdges.length > 0) {
-      ctx.strokeStyle = '#475569';
-      ctx.lineWidth = 0.5;
+      ctx.strokeStyle = '#64748b';
+      ctx.lineWidth = 0.8;
       ctx.beginPath();
       for (const [x1, y1, x2, y2] of pitOutlineEdges) {
         ctx.moveTo(mapX(x1), mapY(y1));
         ctx.lineTo(mapX(x2), mapY(y2));
       }
       ctx.stroke();
-    } else {
-      ctx.strokeStyle = '#475569';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(mapX(minX), mapY(maxY), rangeX * scale, rangeY * scale);
     }
 
     // Draw surface intersection trace on plan overview
@@ -443,7 +469,7 @@ export default function CrossSectionPanel({
     ctx.strokeStyle = '#334155';
     ctx.lineWidth = 1;
     ctx.strokeRect(0, 0, cw, ch);
-  }, [pitBounds, pitOutlineEdges, sectionLine, data.profiles, surfaceStyles]);
+  }, [pitBounds, pitOutlineEdges, uploadsForOverview, sectionLine, data.profiles, surfaceStyles]);
 
   // Interactions
   const dragRef = useRef<{ sx: number; sy: number; sv: ViewBox } | null>(null);

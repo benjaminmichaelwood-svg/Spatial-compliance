@@ -721,8 +721,7 @@ export default function App() {
                 title="Measure distance (click two points)"
               >
                 <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 21l18-18M3 21h5v-5M21 3h-5v5" />
-                  <path strokeLinecap="round" d="M8 16l2-2M12 12l2-2M16 8l-2 2" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M2 17l3-3 2 2 3-3 2 2 3-3 2 2 3-3 2 2 1-1V7L20 5 5 20H2v-3z" />
                 </svg>
               </button>
               <button
@@ -928,6 +927,7 @@ export default function App() {
                         sectionLine={sectionLine}
                         pitBounds={pitBounds}
                         pitOutlineEdges={pitOutlineEdges}
+                        uploads={uploads}
                         onSelectProfile={(role) => setSelectedId(`surface:${role}`)}
                         onSelectSolid={(domain) => setSelectedId(`domain:${domain}`)}
                         onStepSection={handleStepSection}
