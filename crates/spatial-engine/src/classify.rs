@@ -591,7 +591,7 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
 
     let has_boundaries = !input.boundaries.is_empty();
 
-    let mut builders: HashMap<(Domain, Option<usize>), ShellBuilder> = HashMap::new();
+    let mut domains: Vec<DomainSolid> = Vec::new();
 
     let mut present_indices: Vec<usize> = (0..5).filter(|&i| opt_surfaces[i].is_some()).collect();
     present_indices.sort_by(|&a, &b| {
@@ -766,7 +766,8 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
             }
         }
 
-        // Pass 2: group by (domain, block_idx), find connected components
+        // Pass 2: group by (domain, block_idx), find connected components,
+        // build each component as its own solid, filter individually.
         let mut domain_tris: HashMap<(Domain, Option<usize>), Vec<(usize, TriResult)>> = HashMap::new();
         for (ti, results) in tri_results.iter().enumerate() {
             for result in results {
@@ -777,99 +778,88 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
             }
         }
 
+        let mut total_built = 0usize;
+        let mut total_kept = 0usize;
+        let mut total_discarded = 0usize;
+
         for ((domain, block_idx), entries) in domain_tris {
             let tri_indices: Vec<usize> = entries.iter().map(|(ti, _)| *ti).collect();
             let comp_ids = surface_domain_components(ref_surface, &tri_indices);
 
-            // Group entries by component id
             let mut comp_entries: HashMap<usize, Vec<&TriResult>> = HashMap::new();
             for (idx, (_ti, result)) in entries.iter().enumerate() {
                 comp_entries.entry(comp_ids[idx]).or_default().push(result);
             }
 
+            let block_name = block_idx.map(|i| input.boundaries[i].name.clone());
             let domain_label = domain.label();
-            let total_comps = comp_entries.len();
-            let mut kept = 0usize;
-            let mut dropped_tri = 0usize;
-            let mut dropped_vol = 0usize;
-            let mut dropped_thick = 0usize;
 
-            for (_cid, comp_results) in &comp_entries {
-                if comp_results.len() < input.filter.min_triangles {
-                    dropped_tri += 1;
-                    continue;
-                }
-
-                // Build a temporary shell for this component to check volume/thickness
-                let mut comp_builder = ShellBuilder::new();
+            for (cid, comp_results) in &comp_entries {
+                let mut builder = ShellBuilder::new();
                 for result in comp_results {
-                    comp_builder.add_shell_face(result.top, result.bot_z);
+                    builder.add_shell_face(result.top, result.bot_z);
                 }
 
-                if let Some(comp_solid) = comp_builder.into_solid(String::new()) {
-                    if comp_solid.volume < input.filter.min_volume_m3 {
-                        dropped_vol += 1;
-                        continue;
-                    }
-                    let thickness = if comp_solid.surface_area > 1e-9 {
-                        comp_solid.volume / comp_solid.surface_area
+                let label = match &block_name {
+                    Some(bn) => format!("{} — {}", domain_label, bn),
+                    None => domain_label.to_string(),
+                };
+
+                if let Some(solid) = builder.into_solid(label.clone()) {
+                    total_built += 1;
+                    let volume = solid.volume;
+                    let thickness = if solid.surface_area > 1e-9 {
+                        volume / solid.surface_area
                     } else {
                         0.0
                     };
+                    let tri_count = comp_results.len();
+
+                    if volume < input.filter.min_volume_m3 {
+                        #[cfg(target_arch = "wasm32")]
+                        web_sys::console::log_1(&format!(
+                            "[Filter] {} | comp_{:03} | {} tris | {:.0} m³ | {:.1}m thick | DISCARDED (vol < {})",
+                            domain_label, cid, tri_count, volume, thickness, input.filter.min_volume_m3,
+                        ).into());
+                        total_discarded += 1;
+                        continue;
+                    }
                     if thickness < input.filter.min_thickness_m {
-                        dropped_thick += 1;
+                        #[cfg(target_arch = "wasm32")]
+                        web_sys::console::log_1(&format!(
+                            "[Filter] {} | comp_{:03} | {} tris | {:.0} m³ | {:.1}m thick | DISCARDED (thick < {})",
+                            domain_label, cid, tri_count, volume, thickness, input.filter.min_thickness_m,
+                        ).into());
+                        total_discarded += 1;
                         continue;
                     }
 
-                    // Component passed all filters — add to the main builder
-                    kept += 1;
-                    let key = (domain, block_idx);
-                    let main_builder = builders.entry(key).or_insert_with(ShellBuilder::new);
-                    for result in comp_results {
-                        main_builder.add_shell_face(result.top, result.bot_z);
-                    }
-                } else {
-                    dropped_tri += 1;
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::log_1(&format!(
+                        "[Filter] {} | comp_{:03} | {} tris | {:.0} m³ | {:.1}m thick | KEPT",
+                        domain_label, cid, tri_count, volume, thickness,
+                    ).into());
+                    total_kept += 1;
+
+                    domains.push(DomainSolid {
+                        domain,
+                        label,
+                        color: domain.color().to_string(),
+                        solid,
+                        volume,
+                        block_name: block_name.clone(),
+                    });
                 }
             }
-
-            #[cfg(target_arch = "wasm32")]
-            web_sys::console::log_1(&format!(
-                "[SliverFilter] {} : {} components total, {} kept, {} dropped(tri<{}), {} dropped(vol<{}), {} dropped(thick<{})",
-                domain_label, total_comps, kept,
-                dropped_tri, input.filter.min_triangles,
-                dropped_vol, input.filter.min_volume_m3,
-                dropped_thick, input.filter.min_thickness_m,
-            ).into());
         }
+
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&format!(
+            "[Filter] SUMMARY: {} solids built, {} kept, {} discarded",
+            total_built, total_kept, total_discarded,
+        ).into());
 
         processed_surfaces.push(si);
-    }
-
-    let mut domains: Vec<DomainSolid> = Vec::new();
-    for ((domain, block_idx), builder) in builders {
-        let block_name = block_idx.map(|i| input.boundaries[i].name.clone());
-        let label = match &block_name {
-            Some(bn) => format!("{} — {}", domain.label(), bn),
-            None => domain.label().to_string(),
-        };
-
-        if let Some(solid) = builder.into_solid(label.clone()) {
-            let volume = solid.volume;
-            #[cfg(target_arch = "wasm32")]
-            web_sys::console::log_1(&format!(
-                "[SliverFilter] Final solid '{}': volume={:.1} m³, area={:.1} m²",
-                label, volume, solid.surface_area,
-            ).into());
-            domains.push(DomainSolid {
-                domain,
-                label,
-                color: domain.color().to_string(),
-                solid,
-                volume,
-                block_name,
-            });
-        }
     }
 
     // Summary
