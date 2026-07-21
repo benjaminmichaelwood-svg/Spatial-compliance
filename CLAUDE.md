@@ -154,6 +154,49 @@ Run `node scripts/visual-check.mjs` (requires `npm run dev` on localhost:5173 an
 - File upload filter fix (.00t greyed out on iOS)
 - vulZ compressed .00t format support
 
+## Session Log — 2026-07-21
+
+### What Was Done
+**BUG 1 — Volume/thickness filter producing wrong results:**
+- Root cause: `compute_signed_volume()` in `solid.rs` suffered catastrophic floating-point cancellation with mine coordinates far from origin (e.g., 782000, 7331000). Per-tetrahedron values ~1e19 cancel to ~100 m³, exceeding f64 precision.
+- Fix: translate all vertices to local origin (subtract first vertex) before computing. Files changed: `crates/spatial-engine/src/solid.rs`
+- Added 2 integration tests in `crates/spatial-engine/src/classify.rs` (~line 1685+): `volume_filter_at_mine_coordinates` and `signed_volume_mine_coords_accurate`
+- Rebuilt WASM: `web/public/spatial_engine_bg.wasm`
+
+**BUG 2 — Cross-section tool (5 sub-items):**
+- Surface checkboxes not toggling visibility — changed to use local `hiddenProfiles`/`hiddenSolids` state only, removed dependency on parent 3D `surfaceVisible`/`domainVisible` maps. File: `web/src/components/CrossSectionPanel.tsx`
+- Domain solid fills not showing — `flatDomainToLightDomainSolid` was creating DomainSolid with empty `vertices: []` and `indices: []`. Renamed to `flatDomainToDomainSolid` and now reconstructs full vertex/index arrays from Float32Array/Uint32Array. File: `web/src/App.tsx`
+- Plan overview panel empty — added surface intersection traces to overview canvas. File: `web/src/components/CrossSectionPanel.tsx`
+- CTRL+scroll to step section line — implemented perpendicular stepping. File: `web/src/components/CrossSectionPanel.tsx`
+- Forward/back step buttons — added ◀/▶ buttons with auto-calculated step size. File: `web/src/components/CrossSectionPanel.tsx`
+
+**BUG 3 — Measure/distance tool redesign (Deswik-style):**
+- Ruler icon, click point 1, live tooltip with Distance/Plan Length/dZ/Bearing/Grade/Coordinates following cursor, click point 2 to lock. Added `computeMeasureMetrics()`, `MeasureCursorTracker` component, floating tooltip overlay. File: `web/src/components/Viewer.tsx`, `web/src/App.tsx`
+
+**BUG 4 — Wire toggle only works for Schedule Future:**
+- Added `wireframe={style.wireframe}` to `meshPhongMaterial` in both `SurfaceMesh` and `BatchedDomainGroup`. File: `web/src/components/Viewer.tsx`
+
+### What Failed / Approaches to Avoid
+- **WASM pkg directory confusion:** `wasm-pack build` outputs to `crates/spatial-engine/pkg/` when run from inside the crate. Must copy explicitly: `cp crates/spatial-engine/pkg/spatial_engine_bg.wasm web/public/`. The `web/public/pkg/` path is gitignored — only the copy at `web/public/spatial_engine_bg.wasm` should be staged.
+- **Cross-section variable naming conflict:** Using `p1`/`p2` for section line endpoints before the destructured `const [p1, p2] = sectionLine` caused shadowing errors. Renamed to `sl1`/`sl2`.
+- **Grid-based volume computation:** Never use grid sampling — direct mesh-on-mesh with BVH is the only approach that scales for 20km mine sites. This was already established but worth repeating.
+
+### What's Still Broken / Known Issues
+- All changes are **NOT VISUALLY VERIFIED** — dev server was not started for interactive testing this session
+- Cross-section tool overall still listed as "In Progress" — the 5 fixes above address specific bugs but full feature may need more work
+- Polygon drawing tool still broken (not addressed this session)
+- CAD performance still laggy (not addressed this session)
+- Camera click-to-set-pivot not implemented
+- PPTX reporting still in progress
+- iOS .00t file upload filter still broken
+
+### Git Status
+- **Branch:** `claude/mining-spatial-compliance-tool-0ypu8c` — merged to `main`, both pushed and in sync
+- **Latest commit on main:** `b26cd40 Fix wireframe toggle, measure tool redesign, cross-section improvements`
+- **All changes committed and pushed:** Yes
+- **Working tree:** Clean, nothing uncommitted
+- **67 Rust tests pass** (65 original + 2 new), 2 ignored (require local .00t files)
+
 ## Conventions
 - Push completed work to main branch for deployment
 - Tests with #[ignore] for those requiring local .00t files
