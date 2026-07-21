@@ -1683,6 +1683,119 @@ mod tests {
     }
 
     #[test]
+    fn volume_filter_at_mine_coordinates() {
+        // Two spatially separated groups at real mine coordinates.
+        // Group A (large): 100×100m footprint, 20m thick → ~200,000 m³
+        // Group B (tiny):  2×2m footprint, 1m thick → ~4 m³
+        // Filter at min_volume=100 should keep A and discard B.
+        let ox = 782000.0;
+        let oy = 7_331_000.0;
+        let oz = 200.0;
+
+        // Large group: 100×100 quad at z=220 (upper) and z=200 (lower)
+        let ps = TriSurface {
+            name: "ps".into(),
+            vertices: vec![
+                Vec3::new(ox, oy, oz + 20.0),
+                Vec3::new(ox + 100.0, oy, oz + 20.0),
+                Vec3::new(ox + 100.0, oy + 100.0, oz + 20.0),
+                Vec3::new(ox, oy + 100.0, oz + 20.0),
+                // Tiny group offset 500m away
+                Vec3::new(ox + 500.0, oy, oz + 1.0),
+                Vec3::new(ox + 502.0, oy, oz + 1.0),
+                Vec3::new(ox + 502.0, oy + 2.0, oz + 1.0),
+                Vec3::new(ox + 500.0, oy + 2.0, oz + 1.0),
+            ],
+            indices: vec![
+                [0, 1, 2], [0, 2, 3],
+                [4, 5, 6], [4, 6, 7],
+            ],
+        };
+        let pe = TriSurface {
+            name: "pe".into(),
+            vertices: vec![
+                Vec3::new(ox, oy, oz),
+                Vec3::new(ox + 100.0, oy, oz),
+                Vec3::new(ox + 100.0, oy + 100.0, oz),
+                Vec3::new(ox, oy + 100.0, oz),
+                Vec3::new(ox + 500.0, oy, oz),
+                Vec3::new(ox + 502.0, oy, oz),
+                Vec3::new(ox + 502.0, oy + 2.0, oz),
+                Vec3::new(ox + 500.0, oy + 2.0, oz),
+            ],
+            indices: vec![
+                [0, 1, 2], [0, 2, 3],
+                [4, 5, 6], [4, 6, 7],
+            ],
+        };
+
+        let r = classify_conformance(&ConformanceInput {
+            production_start: Some(&ps),
+            production_end: Some(&pe),
+            schedule_start: None,
+            schedule_end: None,
+            schedule_future: None,
+            mode: Mode::Dig,
+            filter: SliverFilter {
+                min_volume_m3: 100.0,
+                min_thickness_m: 0.0,
+                min_triangles: 0,
+            },
+            boundaries: &[],
+        });
+
+        // Should have exactly 1 domain solid (the large group)
+        assert_eq!(
+            r.domains.len(), 1,
+            "Expected 1 domain after filter (large group only), got {}",
+            r.domains.len()
+        );
+
+        let vol = r.domains[0].volume;
+        assert!(
+            vol > 10_000.0,
+            "Surviving solid should be large (>10,000 m³), got {vol:.1}"
+        );
+        assert!(
+            vol < 300_000.0,
+            "Volume should be reasonable (<300,000 m³), got {vol:.1}"
+        );
+    }
+
+    #[test]
+    fn signed_volume_mine_coords_accurate() {
+        // Verify compute_signed_volume works at mine-scale coordinates.
+        // A unit cube at (782000, 7331000, 200) should have volume ~1.0.
+        use crate::solid::compute_signed_volume;
+        let ox = 782000.0;
+        let oy = 7_331_000.0;
+        let oz = 200.0;
+        let vertices = vec![
+            Vec3::new(ox, oy, oz),
+            Vec3::new(ox + 1.0, oy, oz),
+            Vec3::new(ox + 1.0, oy + 1.0, oz),
+            Vec3::new(ox, oy + 1.0, oz),
+            Vec3::new(ox, oy, oz + 1.0),
+            Vec3::new(ox + 1.0, oy, oz + 1.0),
+            Vec3::new(ox + 1.0, oy + 1.0, oz + 1.0),
+            Vec3::new(ox, oy + 1.0, oz + 1.0),
+        ];
+        let indices: Vec<[u32; 3]> = vec![
+            [0, 2, 1], [0, 3, 2],
+            [4, 5, 6], [4, 6, 7],
+            [0, 1, 5], [0, 5, 4],
+            [2, 3, 7], [2, 7, 6],
+            [0, 4, 7], [0, 7, 3],
+            [1, 2, 6], [1, 6, 5],
+        ];
+        let vol = compute_signed_volume(&vertices, &indices);
+        assert!(
+            (vol - 1.0).abs() < 0.01,
+            "Unit cube at mine coords should have volume ~1.0, got {vol}"
+        );
+    }
+
+    #[test]
     fn classify_surface_domains_schedule_only() {
         let ss = flat(100.0, "ss", 10.0);
         let se = flat(90.0, "se", 10.0);

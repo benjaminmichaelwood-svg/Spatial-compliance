@@ -125,11 +125,18 @@ fn add_tri_prism(
 
 /// Signed volume of a closed triangulated mesh using the divergence theorem.
 pub fn compute_signed_volume(vertices: &[Vec3], indices: &[[u32; 3]]) -> f64 {
+    if vertices.is_empty() || indices.is_empty() {
+        return 0.0;
+    }
+    // Translate to local origin to avoid catastrophic cancellation.
+    // Mine coordinates (e.g. 782879, 7331000, 228) produce per-tetrahedron
+    // values ~1e19 that cancel to ~100 m³ — beyond f64 precision without this.
+    let c = vertices[0];
     let mut vol = 0.0;
     for tri in indices {
-        let v0 = vertices[tri[0] as usize];
-        let v1 = vertices[tri[1] as usize];
-        let v2 = vertices[tri[2] as usize];
+        let v0 = vertices[tri[0] as usize] - c;
+        let v1 = vertices[tri[1] as usize] - c;
+        let v2 = vertices[tri[2] as usize] - c;
         vol += v0.dot(v1.cross(v2));
     }
     vol / 6.0
