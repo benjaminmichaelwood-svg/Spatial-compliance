@@ -11,6 +11,7 @@ interface Props {
   surfaceStyles: Map<SurfaceRole, { color: string; opacity: number }>;
   sectionLine: [[number, number], [number, number]];
   pitBounds: { minX: number; maxX: number; minY: number; maxY: number } | null;
+  pitOutlineEdges?: [number, number, number, number][];
   onSelectProfile?: (role: SurfaceRole) => void;
   onSelectSolid?: (domain: string) => void;
   onStepSection?: (offset: number) => void;
@@ -53,6 +54,7 @@ export default function CrossSectionPanel({
   surfaceStyles,
   sectionLine,
   pitBounds,
+  pitOutlineEdges,
   onSelectProfile,
   onSelectSolid,
   onStepSection,
@@ -356,10 +358,21 @@ export default function CrossSectionPanel({
       ctx.stroke();
     }
 
-    // Pit outline (bounding box)
-    ctx.strokeStyle = '#475569';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(mapX(minX), mapY(maxY), rangeX * scale, rangeY * scale);
+    // Pit outline from boundary edges
+    if (pitOutlineEdges && pitOutlineEdges.length > 0) {
+      ctx.strokeStyle = '#475569';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      for (const [x1, y1, x2, y2] of pitOutlineEdges) {
+        ctx.moveTo(mapX(x1), mapY(y1));
+        ctx.lineTo(mapX(x2), mapY(y2));
+      }
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = '#475569';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(mapX(minX), mapY(maxY), rangeX * scale, rangeY * scale);
+    }
 
     // Draw surface intersection trace on plan overview
     const [sl1, sl2] = sectionLine;
@@ -430,7 +443,7 @@ export default function CrossSectionPanel({
     ctx.strokeStyle = '#334155';
     ctx.lineWidth = 1;
     ctx.strokeRect(0, 0, cw, ch);
-  }, [pitBounds, sectionLine, data.profiles, surfaceStyles]);
+  }, [pitBounds, pitOutlineEdges, sectionLine, data.profiles, surfaceStyles]);
 
   // Interactions
   const dragRef = useRef<{ sx: number; sy: number; sv: ViewBox } | null>(null);

@@ -53,8 +53,6 @@ function sampleRamp(t: number): [number, number, number] {
 (THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
-const EDGES_TRI_THRESHOLD = 100_000;
-
 interface DomainGroupProps {
   domain: string;
   solids: FlatDomainSolid[];
@@ -184,7 +182,6 @@ interface SurfaceMeshProps {
 
 function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, isDark, domainMap, domainVisible, thicknessMap, thicknessMode }: SurfaceMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
-  const edgesRef = useRef<THREE.LineSegments>(null);
   const matRef = useRef<THREE.MeshPhongMaterial>(null);
 
   const { geometry, triCount } = useMemo(() => {
@@ -263,12 +260,6 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
   const isPainted = !!paintedGeo;
   const activeGeo = paintedGeo ?? geometry;
 
-  const edgesGeo = useMemo(() => {
-    if (triCount >= EDGES_TRI_THRESHOLD) return null;
-    if (isPainted) return null;
-    return new THREE.EdgesGeometry(geometry, 30);
-  }, [geometry, triCount, isPainted]);
-
   useEffect(() => {
     if (!matRef.current) return;
     if (isPainted) {
@@ -283,9 +274,8 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
       matRef.current.opacity = style.opacity;
       matRef.current.transparent = style.opacity < 1;
     }
-    matRef.current.wireframe = style.wireframe;
     matRef.current.needsUpdate = true;
-  }, [style.color, style.opacity, style.wireframe, selected, highlighted, isPainted]);
+  }, [style.color, style.opacity, selected, highlighted, isPainted]);
 
   const roleLabel = SURFACE_ROLES.find((r) => r.key === upload.role)?.label ?? upload.role;
   const id = `surface-${upload.role}`;
@@ -352,16 +342,21 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
           side={THREE.DoubleSide}
           flatShading={false}
           shininess={isPainted ? 15 : 10}
-          wireframe={style.wireframe}
-          polygonOffset={isPainted}
-          polygonOffsetFactor={isPainted ? -1 : 0}
-          polygonOffsetUnits={isPainted ? -1 : 0}
+          polygonOffset
+          polygonOffsetFactor={1}
+          polygonOffsetUnits={1}
         />
       </mesh>
-      {edgesGeo && (
-        <lineSegments ref={edgesRef} geometry={edgesGeo} frustumCulled>
-          <lineBasicMaterial color={isDark ? EDGE_COLOR_DARK : EDGE_COLOR_LIGHT} transparent opacity={0.3} />
-        </lineSegments>
+      {style.wireframe && (
+        <mesh geometry={activeGeo} frustumCulled>
+          <meshBasicMaterial
+            wireframe
+            color={isDark ? EDGE_COLOR_DARK : EDGE_COLOR_LIGHT}
+            transparent
+            opacity={0.15}
+            depthWrite={false}
+          />
+        </mesh>
       )}
     </group>
   );
@@ -416,18 +411,12 @@ function BatchedDomainGroup({
   domain, solids, visible, style, selected, highlighted, isDark, onHover, onSelect,
 }: DomainGroupProps) {
   const meshRef = useRef<THREE.Mesh>(null);
-  const edgesRef = useRef<THREE.LineSegments>(null);
   const matRef = useRef<THREE.MeshPhongMaterial>(null);
 
   const { geo, triRanges, totalTris } = useMemo(() => {
     const result = buildBatchedGeometry(solids);
     return { geo: result.geometry, triRanges: result.triRanges, totalTris: result.totalTris };
   }, [solids]);
-
-  const edgesGeo = useMemo(() => {
-    if (totalTris >= EDGES_TRI_THRESHOLD) return null;
-    return new THREE.EdgesGeometry(geo, 30);
-  }, [geo, totalTris]);
 
   useEffect(() => {
     if (!matRef.current) return;
@@ -437,9 +426,8 @@ function BatchedDomainGroup({
     matRef.current.color.copy(c);
     matRef.current.opacity = style.opacity;
     matRef.current.transparent = style.opacity < 1;
-    matRef.current.wireframe = style.wireframe;
     matRef.current.needsUpdate = true;
-  }, [style.color, style.opacity, style.wireframe, selected, highlighted]);
+  }, [style.color, style.opacity, selected, highlighted]);
 
   const findSolid = useCallback((faceIndex: number) => {
     for (const range of triRanges) {
@@ -509,13 +497,21 @@ function BatchedDomainGroup({
           side={THREE.DoubleSide}
           flatShading={false}
           shininess={10}
-          wireframe={style.wireframe}
+          polygonOffset
+          polygonOffsetFactor={1}
+          polygonOffsetUnits={1}
         />
       </mesh>
-      {edgesGeo && (
-        <lineSegments ref={edgesRef} geometry={edgesGeo} frustumCulled>
-          <lineBasicMaterial color={isDark ? EDGE_COLOR_DARK : EDGE_COLOR_LIGHT} transparent opacity={0.3} />
-        </lineSegments>
+      {style.wireframe && (
+        <mesh geometry={geo} frustumCulled>
+          <meshBasicMaterial
+            wireframe
+            color={isDark ? EDGE_COLOR_DARK : EDGE_COLOR_LIGHT}
+            transparent
+            opacity={0.15}
+            depthWrite={false}
+          />
+        </mesh>
       )}
     </group>
   );
@@ -672,6 +668,50 @@ function MeasureCursorTracker({ active, onMove }: {
     canvas.addEventListener('mousemove', handleMouseMove);
     return () => canvas.removeEventListener('mousemove', handleMouseMove);
   }, [active, scene, camera, gl, raycaster, onMove]);
+
+  return null;
+}
+
+function MeasureClickHandler({ active, onMeasureClick }: {
+  active: boolean;
+  onMeasureClick: (point: MeasurePoint) => void;
+}) {
+  const { scene, camera, gl } = useThree();
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+
+  useEffect(() => {
+    if (!active) return;
+    const canvas = gl.domElement;
+    const prevCursor = canvas.style.cursor;
+    canvas.style.cursor = 'crosshair';
+
+    const onClick = (e: MouseEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      raycaster.setFromCamera(ndc, camera);
+      const meshes: THREE.Mesh[] = [];
+      scene.traverse((obj) => { if (obj instanceof THREE.Mesh && obj.visible) meshes.push(obj); });
+      raycaster.firstHitOnly = true;
+      const hits = raycaster.intersectObjects(meshes, false);
+      raycaster.firstHitOnly = false;
+      if (hits.length > 0) {
+        onMeasureClick({
+          position: hits[0].point.clone(),
+          screenX: e.clientX,
+          screenY: e.clientY,
+        });
+      }
+    };
+
+    canvas.addEventListener('click', onClick);
+    return () => {
+      canvas.style.cursor = prevCursor;
+      canvas.removeEventListener('click', onClick);
+    };
+  }, [active, scene, camera, gl, raycaster, onMeasureClick]);
 
   return null;
 }
@@ -1324,16 +1364,6 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
     onSelect(id, info);
   }, [measureTool, onSelect]);
 
-  const handleCanvasClick = useCallback((e: any) => {
-    if (measureTool === 'none') return;
-    if (!e.point) return;
-    onAddMeasurePoint({
-      position: e.point.clone(),
-      screenX: e.clientX ?? 0,
-      screenY: e.clientY ?? 0,
-    });
-  }, [measureTool, onAddMeasurePoint]);
-
   const handleBgClick = useCallback(() => {
     if (measureTool === 'none') {
       onSelect(null, null);
@@ -1389,7 +1419,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
 
         {[...domainGroups.entries()].map(([domain, solids]) => {
           const id = `domain-${domain}`;
-          const defaultStyle: ObjectStyle = { color: solids[0].color, opacity: 0.85, wireframe: false };
+          const defaultStyle: ObjectStyle = { color: solids[0].color, opacity: 0.85, wireframe: true };
           const style = domainStyles.get(domain) ?? defaultStyle;
           return (
             <BatchedDomainGroup
@@ -1414,7 +1444,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           const defaultStyle: ObjectStyle = {
             color: DEFAULT_SURFACE_COLORS[role],
             opacity: hasDomainMap ? 0.92 : 0.3,
-            wireframe: false,
+            wireframe: true,
           };
           const style = surfaceStyles.get(role) ?? defaultStyle;
           return (
@@ -1450,13 +1480,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
 
         <MeasureOverlay3D points={measurePoints} tool={measureTool} savedMeasurements={savedMeasurements} sphereRadius={sphereRadius} liveCursorPos={liveMeasurePos?.world} />
         <MeasureCursorTracker active={measureTool === 'distance' && measurePoints.length === 1} onMove={setLiveMeasurePos} />
-
-        {measureTool !== 'none' && (
-          <mesh visible={false} onClick={handleCanvasClick} position={[0, 0, displayZ]}>
-            <planeGeometry args={[100000, 100000]} />
-            <meshBasicMaterial transparent opacity={0} />
-          </mesh>
-        )}
+        <MeasureClickHandler active={measureTool !== 'none'} onMeasureClick={onAddMeasurePoint} />
 
         <AutoFit flatDomains={flatDomains} visible={visible} uploads={uploads} />
         <ViewPresetController

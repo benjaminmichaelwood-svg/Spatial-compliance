@@ -578,6 +578,35 @@ export default function App() {
     return found ? { minX, maxX, minY, maxY } : null;
   }, [uploads]);
 
+  const pitOutlineEdges = useMemo(() => {
+    const edges: [number, number, number, number][] = [];
+    for (const upload of uploads.values()) {
+      const edgeCount = new Map<string, { count: number; x1: number; y1: number; x2: number; y2: number }>();
+      for (let t = 0; t < upload.triangleCount; t++) {
+        const i0 = upload.indices[t * 3], i1 = upload.indices[t * 3 + 1], i2 = upload.indices[t * 3 + 2];
+        const verts = [i0, i1, i2];
+        for (let e = 0; e < 3; e++) {
+          const a = verts[e], b = verts[(e + 1) % 3];
+          const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+          const existing = edgeCount.get(key);
+          if (existing) {
+            existing.count++;
+          } else {
+            edgeCount.set(key, {
+              count: 1,
+              x1: upload.positions[a * 3], y1: upload.positions[a * 3 + 1],
+              x2: upload.positions[b * 3], y2: upload.positions[b * 3 + 1],
+            });
+          }
+        }
+      }
+      for (const { count, x1, y1, x2, y2 } of edgeCount.values()) {
+        if (count === 1) edges.push([x1, y1, x2, y2]);
+      }
+    }
+    return edges;
+  }, [uploads]);
+
   const handleCapture = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -898,6 +927,7 @@ export default function App() {
                         surfaceStyles={surfaceStyles}
                         sectionLine={sectionLine}
                         pitBounds={pitBounds}
+                        pitOutlineEdges={pitOutlineEdges}
                         onSelectProfile={(role) => setSelectedId(`surface:${role}`)}
                         onSelectSolid={(domain) => setSelectedId(`domain:${domain}`)}
                         onStepSection={handleStepSection}

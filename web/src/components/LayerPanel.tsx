@@ -93,9 +93,9 @@ function StyleControls({
             ? 'bg-indigo-500/30 text-indigo-300'
             : 'bg-slate-700/50 text-slate-500 hover:text-slate-300'
         }`}
-        title="Toggle wireframe"
+        title="Toggle edge traces"
       >
-        Wire
+        Edges
       </button>
     </div>
   );
@@ -212,7 +212,7 @@ export default function LayerPanel({
             {uploadedRoles.map(({ key, label }) => {
               const upload = uploads.get(key)!;
               const isOn = surfaceVisible.has(key);
-              const defaultStyle: ObjectStyle = { color: DEFAULT_SURFACE_COLORS[key], opacity: 0.3, wireframe: false };
+              const defaultStyle: ObjectStyle = { color: DEFAULT_SURFACE_COLORS[key], opacity: 0.3, wireframe: true };
               const style = surfaceStyles.get(key) ?? defaultStyle;
               const isExpanded = expandedSurface === key;
               return (
@@ -263,7 +263,7 @@ export default function LayerPanel({
       <div className="space-y-0.5">
         {[...grouped.entries()].map(([domain, info]) => {
           const isVisible = visible.has(domain);
-          const defaultStyle: ObjectStyle = { color: info.color, opacity: 0.85, wireframe: false };
+          const defaultStyle: ObjectStyle = { color: info.color, opacity: 0.85, wireframe: true };
           const style = domainStyles.get(domain) ?? defaultStyle;
           const isExpanded = expandedDomain === domain;
           return (
