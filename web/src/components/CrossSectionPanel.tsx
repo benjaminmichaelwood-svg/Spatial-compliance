@@ -25,6 +25,18 @@ interface ViewBox {
   maxZ: number;
 }
 
+interface TraceStyle {
+  color: string;
+  dash: number[];
+  width: number;
+}
+
+interface OverviewView {
+  cx: number;
+  cy: number;
+  zoom: number;
+}
+
 const MARGIN = { top: 40, right: 16, bottom: 44, left: 64 };
 
 function niceStep(range: number, target: number): number {
@@ -39,12 +51,44 @@ const PRODUCTION_ROLES: SurfaceRole[] = ['production_start', 'production_end'];
 const SCHEDULE_ROLES: SurfaceRole[] = ['schedule_start', 'schedule_end'];
 const FUTURE_ROLES: SurfaceRole[] = ['schedule_future'];
 
-function getLineStyle(role: SurfaceRole): { dash: number[]; width: number } {
-  if (PRODUCTION_ROLES.includes(role)) return { dash: [], width: 2 };
-  if (SCHEDULE_ROLES.includes(role)) return { dash: [8, 4], width: 2 };
-  if (FUTURE_ROLES.includes(role)) return { dash: [3, 3], width: 1 };
-  return { dash: [], width: 2 };
+function defaultTraceStyle(role: SurfaceRole, baseColor: string): TraceStyle {
+  if (PRODUCTION_ROLES.includes(role)) return { color: baseColor, dash: [], width: 2 };
+  if (SCHEDULE_ROLES.includes(role)) return { color: baseColor, dash: [8, 4], width: 2 };
+  if (FUTURE_ROLES.includes(role)) return { color: baseColor, dash: [3, 3], width: 1 };
+  return { color: baseColor, dash: [], width: 2 };
 }
+
+const DASH_PRESETS: { label: string; dash: number[] }[] = [
+  { label: 'Solid', dash: [] },
+  { label: 'Dashed', dash: [8, 4] },
+  { label: 'Dotted', dash: [2, 3] },
+  { label: 'Dash-dot', dash: [8, 3, 2, 3] },
+];
+
+const THEME = {
+  dark: {
+    bg: '#1e293b',
+    plotBg: '#0f172a',
+    grid: '#334155',
+    axisText: '#94a3b8',
+    border: '#475569',
+    scaleBar: '#94a3b8',
+    overviewBg: '#0f172a',
+    overviewGrid: '#1e293b',
+    overviewBorder: '#334155',
+  },
+  light: {
+    bg: '#f1f5f9',
+    plotBg: '#ffffff',
+    grid: '#cbd5e1',
+    axisText: '#475569',
+    border: '#94a3b8',
+    scaleBar: '#64748b',
+    overviewBg: '#ffffff',
+    overviewGrid: '#e2e8f0',
+    overviewBorder: '#94a3b8',
+  },
+};
 
 export default function CrossSectionPanel({
   data,
@@ -65,6 +109,24 @@ export default function CrossSectionPanel({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overviewRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 800, h: 500 });
+
+  // Item 1: Background toggle
+  const [isDark, setIsDark] = useState(true);
+  const theme = isDark ? THEME.dark : THEME.light;
+
+  // Item 2: Per-surface trace style overrides
+  const [traceOverrides, setTraceOverrides] = useState<Map<SurfaceRole, Partial<TraceStyle>>>(new Map());
+  const [stylePopover, setStylePopover] = useState<{ role: SurfaceRole; x: number; y: number } | null>(null);
+
+  // Item 4: VE editing
+  const [veEditMode, setVeEditMode] = useState(false);
+  const [veEditValue, setVeEditValue] = useState('');
+  const veInputRef = useRef<HTMLInputElement>(null);
+
+  // Item 3: Overview zoom/pan
+  const [overviewView, setOverviewView] = useState<OverviewView>({ cx: 0, cy: 0, zoom: 1 });
+  const overviewDragRef = useRef<{ sx: number; sy: number; sv: OverviewView } | null>(null);
+  const overviewInitialized = useRef(false);
 
   const bounds = useMemo(() => {
     let minD = Infinity, maxD = -Infinity, minZ = Infinity, maxZ = -Infinity;
@@ -93,7 +155,19 @@ export default function CrossSectionPanel({
   const [view, setView] = useState<ViewBox>(bounds);
   useEffect(() => setView(bounds), [bounds]);
 
-  // Legend visibility toggles (local to section view — checkboxes)
+  // Initialize overview center from pit bounds
+  useEffect(() => {
+    if (pitBounds && !overviewInitialized.current) {
+      setOverviewView({
+        cx: (pitBounds.minX + pitBounds.maxX) / 2,
+        cy: (pitBounds.minY + pitBounds.maxY) / 2,
+        zoom: 1,
+      });
+      overviewInitialized.current = true;
+    }
+  }, [pitBounds]);
+
+  // Legend visibility toggles (local to section view)
   const [hiddenProfiles, setHiddenProfiles] = useState<Set<SurfaceRole>>(new Set());
   const [hiddenSolids, setHiddenSolids] = useState<Set<string>>(new Set());
 
@@ -129,6 +203,18 @@ export default function CrossSectionPanel({
     const zScale = plotH / zRange;
     return zScale / dScale;
   }, [view, plotW, plotH]);
+
+  // Resolve trace style for a profile
+  const getTraceStyle = useCallback((role: SurfaceRole, baseColor: string): TraceStyle => {
+    const base = defaultTraceStyle(role, baseColor);
+    const override = traceOverrides.get(role);
+    if (!override) return base;
+    return {
+      color: override.color ?? base.color,
+      dash: override.dash ?? base.dash,
+      width: override.width ?? base.width,
+    };
+  }, [traceOverrides]);
 
   // Filter profiles and solids by local checkbox state only
   const visibleProfiles = useMemo(() => {
@@ -175,9 +261,9 @@ export default function CrossSectionPanel({
     c.height = size.h * dpr;
     ctx.scale(dpr, dpr);
 
-    ctx.fillStyle = '#1e293b';
+    ctx.fillStyle = theme.bg;
     ctx.fillRect(0, 0, size.w, size.h);
-    ctx.fillStyle = '#0f172a';
+    ctx.fillStyle = theme.plotBg;
     ctx.fillRect(MARGIN.left, MARGIN.top, plotW, plotH);
 
     const dRange = view.maxD - view.minD;
@@ -188,10 +274,10 @@ export default function CrossSectionPanel({
     const zStep = niceStep(zRange, 6);
 
     // Grid
-    ctx.strokeStyle = '#334155';
+    ctx.strokeStyle = theme.grid;
     ctx.lineWidth = 0.5;
     ctx.font = '10px system-ui,sans-serif';
-    ctx.fillStyle = '#94a3b8';
+    ctx.fillStyle = theme.axisText;
 
     ctx.textAlign = 'center';
     for (let d = Math.ceil(view.minD / dStep) * dStep; d <= view.maxD; d += dStep) {
@@ -248,12 +334,12 @@ export default function CrossSectionPanel({
       solidHits.push({ domain: s.domain, path });
     }
 
-    // Draw surface profiles with role-based line styles
+    // Draw surface profiles with trace styles
     for (const p of visibleProfiles) {
       if (p.points.length < 2) continue;
-      const style = surfaceStyles.get(p.role);
-      const color = style?.color || p.color;
-      const lineStyle = getLineStyle(p.role);
+      const pStyle = surfaceStyles.get(p.role);
+      const baseColor = pStyle?.color || p.color;
+      const ts = getTraceStyle(p.role, baseColor);
 
       const path = new Path2D();
       path.moveTo(toX(p.points[0].dist), toY(p.points[0].z));
@@ -261,9 +347,9 @@ export default function CrossSectionPanel({
         path.lineTo(toX(p.points[i].dist), toY(p.points[i].z));
       }
 
-      ctx.setLineDash(lineStyle.dash);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = lineStyle.width;
+      ctx.setLineDash(ts.dash);
+      ctx.strokeStyle = ts.color;
+      ctx.lineWidth = ts.width;
       ctx.stroke(path);
       ctx.setLineDash([]);
       profileHits.push({ role: p.role, path });
@@ -274,7 +360,7 @@ export default function CrossSectionPanel({
     hitTestRef.current = { profiles: profileHits, solids: solidHits };
 
     // Axis labels
-    ctx.fillStyle = '#94a3b8';
+    ctx.fillStyle = theme.axisText;
     ctx.font = '11px system-ui,sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('Chainage (m)', MARGIN.left + plotW / 2, size.h - 4);
@@ -285,7 +371,7 @@ export default function CrossSectionPanel({
     ctx.restore();
 
     // Plot border
-    ctx.strokeStyle = '#475569';
+    ctx.strokeStyle = theme.border;
     ctx.lineWidth = 1;
     ctx.strokeRect(MARGIN.left, MARGIN.top, plotW, plotH);
 
@@ -293,13 +379,12 @@ export default function CrossSectionPanel({
     if (scaleBar.widthPx > 10) {
       const sbX = MARGIN.left + 12;
       const sbY = MARGIN.top + plotH - 16;
-      ctx.strokeStyle = '#94a3b8';
+      ctx.strokeStyle = theme.scaleBar;
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(sbX, sbY);
       ctx.lineTo(sbX + scaleBar.widthPx, sbY);
       ctx.stroke();
-      // End ticks
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(sbX, sbY - 4);
@@ -307,12 +392,12 @@ export default function CrossSectionPanel({
       ctx.moveTo(sbX + scaleBar.widthPx, sbY - 4);
       ctx.lineTo(sbX + scaleBar.widthPx, sbY + 4);
       ctx.stroke();
-      ctx.fillStyle = '#94a3b8';
+      ctx.fillStyle = theme.scaleBar;
       ctx.font = '10px system-ui,sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(scaleBar.label, sbX + scaleBar.widthPx / 2, sbY + 14);
     }
-  }, [data, size, view, plotW, plotH, toX, toY, visibleProfiles, visibleSolids, domainStyles, surfaceStyles, scaleBar]);
+  }, [data, size, view, plotW, plotH, toX, toY, visibleProfiles, visibleSolids, domainStyles, surfaceStyles, scaleBar, theme, getTraceStyle]);
 
   // Plan overview render
   useEffect(() => {
@@ -327,23 +412,27 @@ export default function CrossSectionPanel({
     c.height = ch * dpr;
     ctx.scale(dpr, dpr);
 
-    ctx.fillStyle = '#0f172a';
+    ctx.fillStyle = theme.overviewBg;
     ctx.fillRect(0, 0, cw, ch);
 
     const pad = 20;
     const { minX, maxX, minY, maxY } = pitBounds;
     const rangeX = maxX - minX || 1;
     const rangeY = maxY - minY || 1;
-    const scale = Math.min((cw - pad * 2) / rangeX, (ch - pad * 2) / rangeY);
-    const offX = (cw - rangeX * scale) / 2;
-    const offY = (ch - rangeY * scale) / 2;
+    const baseScale = Math.min((cw - pad * 2) / rangeX, (ch - pad * 2) / rangeY);
+    const scale = baseScale * overviewView.zoom;
 
-    const mapX = (x: number) => offX + (x - minX) * scale;
-    const mapY = (y: number) => offY + (maxY - y) * scale;
+    const baseCx = (minX + maxX) / 2;
+    const baseCy = (minY + maxY) / 2;
+    const viewCx = overviewView.cx || baseCx;
+    const viewCy = overviewView.cy || baseCy;
+
+    const mapX = (x: number) => cw / 2 + (x - viewCx) * scale;
+    const mapY = (y: number) => ch / 2 - (y - viewCy) * scale;
 
     // Grid
     const gridStep = niceStep(Math.max(rangeX, rangeY), 4);
-    ctx.strokeStyle = '#1e293b';
+    ctx.strokeStyle = theme.overviewGrid;
     ctx.lineWidth = 0.5;
     for (let gx = Math.ceil(minX / gridStep) * gridStep; gx <= maxX; gx += gridStep) {
       const sx = mapX(gx);
@@ -449,7 +538,7 @@ export default function CrossSectionPanel({
     // North arrow
     const naX = cw - 16;
     const naY = 20;
-    ctx.strokeStyle = '#94a3b8';
+    ctx.strokeStyle = theme.axisText;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(naX, naY + 14);
@@ -460,18 +549,18 @@ export default function CrossSectionPanel({
     ctx.lineTo(naX, naY - 6);
     ctx.lineTo(naX + 4, naY);
     ctx.stroke();
-    ctx.fillStyle = '#94a3b8';
+    ctx.fillStyle = theme.axisText;
     ctx.font = 'bold 9px system-ui,sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('N', naX, naY - 10);
 
     // Border
-    ctx.strokeStyle = '#334155';
+    ctx.strokeStyle = theme.overviewBorder;
     ctx.lineWidth = 1;
     ctx.strokeRect(0, 0, cw, ch);
-  }, [pitBounds, pitOutlineEdges, uploadsForOverview, sectionLine, data.profiles, surfaceStyles]);
+  }, [pitBounds, pitOutlineEdges, uploadsForOverview, sectionLine, data.profiles, surfaceStyles, theme, overviewView]);
 
-  // Interactions
+  // Interactions — main canvas
   const dragRef = useRef<{ sx: number; sy: number; sv: ViewBox } | null>(null);
 
   const stepSize = useMemo(() => {
@@ -480,26 +569,43 @@ export default function CrossSectionPanel({
     return Math.max(10, Math.round(range / 50));
   }, [pitBounds]);
 
+  // Item 4: Scroll = horizontal zoom, SHIFT+scroll = adjust VE, CTRL+scroll = step section
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       e.preventDefault();
+
+      // CTRL+scroll = step section line
       if (e.ctrlKey && onStepSection) {
         const dir = e.deltaY > 0 ? 1 : -1;
         onStepSection(dir * stepSize);
         return;
       }
+
+      // SHIFT+scroll = adjust vertical exaggeration
+      if (e.shiftKey) {
+        const factor = e.deltaY > 0 ? 1.08 : 1 / 1.08;
+        setView(v => {
+          const zMid = (v.minZ + v.maxZ) / 2;
+          const halfZ = (v.maxZ - v.minZ) / 2;
+          return {
+            ...v,
+            minZ: zMid - halfZ * factor,
+            maxZ: zMid + halfZ * factor,
+          };
+        });
+        return;
+      }
+
+      // Plain scroll = horizontal zoom centered on cursor
       const rect = canvasRef.current?.getBoundingClientRect();
       if (!rect || plotW <= 0 || plotH <= 0) return;
       const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
       const d = view.minD + ((cx - MARGIN.left) / plotW) * (view.maxD - view.minD);
-      const z = view.minZ + (1 - (cy - MARGIN.top) / plotH) * (view.maxZ - view.minZ);
       const f = e.deltaY > 0 ? 1.15 : 1 / 1.15;
       setView(v => ({
+        ...v,
         minD: d - (d - v.minD) * f,
         maxD: d + (v.maxD - d) * f,
-        minZ: z - (z - v.minZ) * f,
-        maxZ: z + (v.maxZ - z) * f,
       }));
     },
     [view, plotW, plotH, onStepSection, stepSize],
@@ -539,7 +645,6 @@ export default function CrossSectionPanel({
       const ctx = c.getContext('2d');
       if (!ctx) return;
 
-      // Check profiles first (they're on top)
       for (let i = hitTestRef.current.profiles.length - 1; i >= 0; i--) {
         const { role, path } = hitTestRef.current.profiles[i];
         ctx.lineWidth = 8 * dpr;
@@ -548,7 +653,6 @@ export default function CrossSectionPanel({
           return;
         }
       }
-      // Then solids
       for (let i = hitTestRef.current.solids.length - 1; i >= 0; i--) {
         const { domain, path } = hitTestRef.current.solids[i];
         if (ctx.isPointInPath(path, x, y)) {
@@ -560,17 +664,110 @@ export default function CrossSectionPanel({
     [onSelectProfile, onSelectSolid],
   );
 
+  // Item 3: Overview interactions
+  const handleOverviewWheel = useCallback(
+    (e: React.WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const f = e.deltaY > 0 ? 1 / 1.2 : 1.2;
+      setOverviewView(v => ({ ...v, zoom: Math.max(0.5, Math.min(20, v.zoom * f)) }));
+    },
+    [],
+  );
+
+  const handleOverviewMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      overviewDragRef.current = { sx: e.clientX, sy: e.clientY, sv: { ...overviewView } };
+    },
+    [overviewView],
+  );
+
+  const handleOverviewMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      if (!overviewDragRef.current || !pitBounds) return;
+      e.stopPropagation();
+      const { sx, sy, sv } = overviewDragRef.current;
+      const { minX, maxX, minY, maxY } = pitBounds;
+      const rangeX = maxX - minX || 1;
+      const rangeY = maxY - minY || 1;
+      const baseScale = Math.min(160 / rangeX, 160 / rangeY);
+      const scale = baseScale * sv.zoom;
+      const dx = (e.clientX - sx) / scale;
+      const dy = (e.clientY - sy) / scale;
+      setOverviewView({ ...sv, cx: sv.cx - dx, cy: sv.cy + dy });
+    },
+    [pitBounds],
+  );
+
+  const stopOverviewDrag = useCallback(() => {
+    overviewDragRef.current = null;
+  }, []);
+
+  // Item 4: VE badge double-click to edit
+  const handleVeDoubleClick = useCallback(() => {
+    setVeEditMode(true);
+    setVeEditValue(ve.toFixed(1));
+    setTimeout(() => veInputRef.current?.select(), 0);
+  }, [ve]);
+
+  const applyVeEdit = useCallback(() => {
+    const newVe = parseFloat(veEditValue);
+    if (isFinite(newVe) && newVe > 0 && plotW > 0 && plotH > 0) {
+      const dRange = view.maxD - view.minD;
+      const dScale = plotW / dRange;
+      const targetZScale = dScale * newVe;
+      const zMid = (view.minZ + view.maxZ) / 2;
+      const halfZ = (plotH / targetZScale) / 2;
+      setView(v => ({ ...v, minZ: zMid - halfZ, maxZ: zMid + halfZ }));
+    }
+    setVeEditMode(false);
+  }, [veEditValue, view, plotW, plotH]);
+
+  // Item 2: Trace style popover handlers
+  const updateTrace = useCallback((role: SurfaceRole, update: Partial<TraceStyle>) => {
+    setTraceOverrides(prev => {
+      const next = new Map(prev);
+      const existing = next.get(role) || {};
+      next.set(role, { ...existing, ...update });
+      return next;
+    });
+  }, []);
+
   return (
     <div className="flex h-full flex-col bg-slate-800">
       {/* Header */}
       <div className="flex flex-shrink-0 items-center justify-between border-b border-slate-700 px-3 py-1.5">
         <div className="flex items-center gap-4">
           <span className="text-xs font-semibold text-slate-200">Cross Section</span>
-          {ve > 1.05 || ve < 0.95 ? (
-            <span className="rounded bg-slate-700 px-1.5 py-0.5 text-[10px] text-amber-400">
+          {/* VE badge — double-click to edit */}
+          {(ve > 1.05 || ve < 0.95) && !veEditMode && (
+            <span
+              className="cursor-pointer rounded bg-slate-700 px-1.5 py-0.5 text-[10px] text-amber-400 hover:bg-slate-600"
+              title="Double-click to set VE, SHIFT+scroll to adjust"
+              onDoubleClick={handleVeDoubleClick}
+            >
               VE: {ve.toFixed(1)}x
             </span>
-          ) : null}
+          )}
+          {veEditMode && (
+            <span className="flex items-center gap-1 rounded bg-slate-700 px-1 py-0.5">
+              <span className="text-[10px] text-amber-400">VE:</span>
+              <input
+                ref={veInputRef}
+                type="text"
+                value={veEditValue}
+                onChange={e => setVeEditValue(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') applyVeEdit();
+                  if (e.key === 'Escape') setVeEditMode(false);
+                }}
+                onBlur={applyVeEdit}
+                className="w-12 rounded bg-slate-600 px-1 py-0 text-[10px] text-amber-400 outline-none"
+              />
+              <span className="text-[10px] text-amber-400">x</span>
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {onStepSection && (
@@ -581,7 +778,7 @@ export default function CrossSectionPanel({
                 className="rounded px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-700 hover:text-white"
                 title={`Step back ${stepSize}m`}
               >
-                ◀
+                &#9664;
               </button>
               <span className="text-[9px] text-slate-500">{stepSize}m</span>
               <button
@@ -590,11 +787,29 @@ export default function CrossSectionPanel({
                 className="rounded px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-700 hover:text-white"
                 title={`Step forward ${stepSize}m`}
               >
-                ▶
+                &#9654;
               </button>
               <div className="mx-1 h-3 w-px bg-slate-600" />
             </>
           )}
+          {/* Item 1: Background toggle */}
+          <button
+            type="button"
+            onClick={() => setIsDark(d => !d)}
+            className="rounded px-2 py-0.5 text-[10px] text-slate-400 hover:bg-slate-700 hover:text-white"
+            title={isDark ? 'Switch to light background' : 'Switch to dark background'}
+          >
+            {isDark ? (
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <circle cx="12" cy="12" r="5" />
+                <path strokeLinecap="round" d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+              </svg>
+            ) : (
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />
+              </svg>
+            )}
+          </button>
           <button
             type="button"
             onClick={() => setView(bounds)}
@@ -632,9 +847,24 @@ export default function CrossSectionPanel({
             <div className="absolute bottom-3 right-3 rounded border border-slate-600 shadow-lg">
               <canvas
                 ref={overviewRef}
-                style={{ width: 200, height: 200, display: 'block' }}
+                style={{ width: 200, height: 200, display: 'block', cursor: 'grab' }}
+                onWheel={handleOverviewWheel}
+                onMouseDown={handleOverviewMouseDown}
+                onMouseMove={handleOverviewMouseMove}
+                onMouseUp={stopOverviewDrag}
+                onMouseLeave={stopOverviewDrag}
               />
               <div className="absolute bottom-1 left-1 text-[8px] text-slate-500">Plan View</div>
+              {overviewView.zoom !== 1 && (
+                <button
+                  type="button"
+                  onClick={() => setOverviewView(v => ({ ...v, zoom: 1, cx: pitBounds ? (pitBounds.minX + pitBounds.maxX) / 2 : v.cx, cy: pitBounds ? (pitBounds.minY + pitBounds.maxY) / 2 : v.cy }))}
+                  className="absolute bottom-1 right-1 rounded bg-slate-700/80 px-1 py-0 text-[8px] text-slate-400 hover:text-white"
+                  title="Reset overview zoom"
+                >
+                  {overviewView.zoom.toFixed(1)}x
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -643,42 +873,125 @@ export default function CrossSectionPanel({
         <div className="w-48 flex-shrink-0 overflow-y-auto border-l border-slate-700 bg-slate-800/80 p-2">
           <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Surfaces</div>
           {data.profiles.map(p => {
-            const style = surfaceStyles.get(p.role);
-            const color = style?.color || p.color;
+            const pStyle = surfaceStyles.get(p.role);
+            const baseColor = pStyle?.color || p.color;
+            const ts = getTraceStyle(p.role, baseColor);
             const isVis = !hiddenProfiles.has(p.role);
-            const lineStyle = getLineStyle(p.role);
             return (
-              <label
-                key={p.role}
-                className="mb-1 flex cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 hover:bg-slate-700/50"
-              >
-                <input
-                  type="checkbox"
-                  checked={isVis}
-                  onChange={() => {
-                    setHiddenProfiles(prev => {
-                      const next = new Set(prev);
-                      if (next.has(p.role)) next.delete(p.role);
-                      else next.add(p.role);
-                      return next;
-                    });
-                  }}
-                  className="h-3 w-3 rounded border-slate-600"
-                />
-                <svg width="20" height="8" className="flex-shrink-0">
-                  <line
-                    x1="0" y1="4" x2="20" y2="4"
-                    stroke={color}
-                    strokeWidth={lineStyle.width}
-                    strokeDasharray={lineStyle.dash.join(',')}
+              <div key={p.role} className="relative mb-1">
+                <label
+                  className="flex cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 hover:bg-slate-700/50"
+                >
+                  <input
+                    type="checkbox"
+                    checked={isVis}
+                    onChange={() => {
+                      setHiddenProfiles(prev => {
+                        const next = new Set(prev);
+                        if (next.has(p.role)) next.delete(p.role);
+                        else next.add(p.role);
+                        return next;
+                      });
+                    }}
+                    className="h-3 w-3 rounded border-slate-600"
                   />
-                </svg>
-                <span className={`truncate text-[10px] ${isVis ? 'text-slate-300' : 'text-slate-500'}`}>
-                  {p.label}
-                </span>
-              </label>
+                  <svg width="20" height="8" className="flex-shrink-0">
+                    <line
+                      x1="0" y1="4" x2="20" y2="4"
+                      stroke={ts.color}
+                      strokeWidth={ts.width}
+                      strokeDasharray={ts.dash.join(',')}
+                    />
+                  </svg>
+                  <span className={`truncate text-[10px] ${isVis ? 'text-slate-300' : 'text-slate-500'}`}>
+                    {p.label}
+                  </span>
+                  {/* Item 2: Style edit button */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const rect = (e.target as HTMLElement).getBoundingClientRect();
+                      setStylePopover(prev =>
+                        prev?.role === p.role ? null : { role: p.role, x: rect.left, y: rect.bottom + 4 }
+                      );
+                    }}
+                    className="ml-auto flex-shrink-0 rounded px-0.5 text-[9px] text-slate-500 hover:bg-slate-600 hover:text-slate-300"
+                    title="Edit line style"
+                  >
+                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" d="M12 5v14M5 12h14" />
+                    </svg>
+                  </button>
+                </label>
+              </div>
             );
           })}
+
+          {/* Item 2: Style popover */}
+          {stylePopover && (() => {
+            const p = data.profiles.find(pr => pr.role === stylePopover.role);
+            if (!p) return null;
+            const pStyle = surfaceStyles.get(p.role);
+            const baseColor = pStyle?.color || p.color;
+            const ts = getTraceStyle(p.role, baseColor);
+            return (
+              <div className="mb-2 rounded border border-slate-600 bg-slate-750 p-2">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-[9px] font-semibold text-slate-400">{p.label}</span>
+                  <button
+                    type="button"
+                    onClick={() => setStylePopover(null)}
+                    className="text-[9px] text-slate-500 hover:text-slate-300"
+                  >
+                    x
+                  </button>
+                </div>
+                {/* Color */}
+                <div className="mb-1.5 flex items-center gap-1.5">
+                  <span className="text-[9px] text-slate-500">Color</span>
+                  <input
+                    type="color"
+                    value={ts.color}
+                    onChange={e => updateTrace(stylePopover.role, { color: e.target.value })}
+                    className="h-5 w-5 cursor-pointer rounded border-0 bg-transparent p-0"
+                  />
+                </div>
+                {/* Width */}
+                <div className="mb-1.5 flex items-center gap-1.5">
+                  <span className="text-[9px] text-slate-500">Width</span>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="5"
+                    step="0.5"
+                    value={ts.width}
+                    onChange={e => updateTrace(stylePopover.role, { width: parseFloat(e.target.value) })}
+                    className="h-1 w-20"
+                  />
+                  <span className="text-[9px] text-slate-400">{ts.width}</span>
+                </div>
+                {/* Dash style */}
+                <div className="flex flex-wrap gap-1">
+                  {DASH_PRESETS.map(dp => {
+                    const active = JSON.stringify(ts.dash) === JSON.stringify(dp.dash);
+                    return (
+                      <button
+                        key={dp.label}
+                        type="button"
+                        onClick={() => updateTrace(stylePopover.role, { dash: dp.dash })}
+                        className={`rounded px-1.5 py-0.5 text-[8px] ${
+                          active ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                        }`}
+                      >
+                        {dp.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
 
           {uniqueDomains.length > 0 && (
             <>
