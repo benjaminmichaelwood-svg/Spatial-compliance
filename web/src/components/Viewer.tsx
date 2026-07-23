@@ -138,8 +138,9 @@ const BG_COLORS: Record<ViewerBackground, string> = {
   light: '#ffffff',
 };
 
-const EDGE_COLOR_DARK = 0x444444;
-const EDGE_COLOR_LIGHT = 0x999999;
+const EDGE_COLOR_DARK = 0x222222;
+const EDGE_COLOR_LIGHT = 0x666666;
+const CREASE_THRESHOLD_DEG = 18;
 
 function computeSmoothNormals(positions: Float32Array): Float32Array {
   const normals = new Float32Array(positions.length);
@@ -347,18 +348,27 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
           polygonOffsetUnits={1}
         />
       </mesh>
-      {style.wireframe && (
-        <mesh geometry={activeGeo} frustumCulled>
-          <meshBasicMaterial
-            wireframe
-            color={isDark ? EDGE_COLOR_DARK : EDGE_COLOR_LIGHT}
-            transparent
-            opacity={0.15}
-            depthWrite={false}
-          />
-        </mesh>
-      )}
+      <CreaseEdges geometry={activeGeo} visible={style.wireframe} isDark={isDark} />
     </group>
+  );
+}
+
+function CreaseEdges({ geometry, visible, isDark }: { geometry: THREE.BufferGeometry; visible: boolean; isDark: boolean }) {
+  const edgesGeo = useMemo(() => {
+    return new THREE.EdgesGeometry(geometry, CREASE_THRESHOLD_DEG);
+  }, [geometry]);
+
+  if (!visible) return null;
+
+  return (
+    <lineSegments geometry={edgesGeo} frustumCulled>
+      <lineBasicMaterial
+        color={isDark ? EDGE_COLOR_DARK : EDGE_COLOR_LIGHT}
+        transparent
+        opacity={0.7}
+        depthWrite={false}
+      />
+    </lineSegments>
   );
 }
 
@@ -502,17 +512,7 @@ function BatchedDomainGroup({
           polygonOffsetUnits={1}
         />
       </mesh>
-      {style.wireframe && (
-        <mesh geometry={geo} frustumCulled>
-          <meshBasicMaterial
-            wireframe
-            color={isDark ? EDGE_COLOR_DARK : EDGE_COLOR_LIGHT}
-            transparent
-            opacity={0.15}
-            depthWrite={false}
-          />
-        </mesh>
-      )}
+      <CreaseEdges geometry={geo} visible={style.wireframe} isDark={isDark} />
     </group>
   );
 }
