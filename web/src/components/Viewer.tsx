@@ -11,43 +11,12 @@ import type {
   MeasureTool,
   ViewPreset,
   ViewerBackground,
+  HeatmapMode,
 } from '../types';
 import { SURFACE_ROLES } from '../types';
 import type { FlatDomainSolid } from '../workers/engineClient';
 import PerformanceOverlay from './PerformanceOverlay';
-import ThicknessLegend, { RAMP } from './ThicknessLegend';
-
-interface ThicknessMode {
-  domain: string;
-  scaleMin: number;
-  scaleMax: number;
-  hideBelow: number | null;
-}
-
-const DOMAIN_NAME_TO_INDEX: Record<string, number> = {
-  PlannedAndMined: 1, PlannedNotMined: 2, MinedNotPlanned: 3,
-  MinedBeforeStart: 4, PrescheduleDelay: 5, AheadOfPlan: 6,
-  PlannedAndDumped: 7, PlannedNotDumped: 8, DumpedNotPlanned: 9,
-  DumpedBeforeStart: 10, DumpPrescheduleDelay: 11, DumpedAheadOfPlan: 12,
-};
-
-function sampleRamp(t: number): [number, number, number] {
-  const clamped = Math.max(0, Math.min(1, t));
-  for (let i = 0; i < RAMP.length - 1; i++) {
-    if (clamped >= RAMP[i].t && clamped <= RAMP[i + 1].t) {
-      const seg = (clamped - RAMP[i].t) / (RAMP[i + 1].t - RAMP[i].t);
-      const c0 = new THREE.Color(RAMP[i].color);
-      const c1 = new THREE.Color(RAMP[i + 1].color);
-      return [
-        c0.r + (c1.r - c0.r) * seg,
-        c0.g + (c1.g - c0.g) * seg,
-        c0.b + (c1.b - c0.b) * seg,
-      ];
-    }
-  }
-  const last = new THREE.Color(RAMP[RAMP.length - 1].color);
-  return [last.r, last.g, last.b];
-}
+import ThicknessLegend, { sampleHeatmapRamp } from './ThicknessLegend';
 
 (THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
 (THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
@@ -167,6 +136,56 @@ function computeSmoothNormals(positions: Float32Array): Float32Array {
   return normals;
 }
 
+function computePerVertexThickness(
+  paintPositions: Float32Array,
+  paintVertexCount: number,
+  refPositions: Float32Array,
+  refIndices: Uint32Array,
+): Float32Array {
+  const refGeo = new THREE.BufferGeometry();
+  refGeo.setAttribute('position', new THREE.BufferAttribute(refPositions.slice(), 3));
+  refGeo.setIndex(new THREE.BufferAttribute(refIndices.slice(), 1));
+  const bvh = new MeshBVH(refGeo);
+
+  const result = new Float32Array(paintVertexCount);
+  const ray = new THREE.Ray();
+
+  let minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < paintVertexCount; i++) {
+    const z = paintPositions[i * 3 + 2];
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  const refTriCount = refIndices.length / 3;
+  for (let i = 0; i < refTriCount; i++) {
+    for (let v = 0; v < 3; v++) {
+      const z = refPositions[refIndices[i * 3 + v] * 3 + 2];
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+  }
+  const zSpan = maxZ - minZ + 100;
+
+  for (let i = 0; i < paintVertexCount; i++) {
+    const x = paintPositions[i * 3];
+    const y = paintPositions[i * 3 + 1];
+    const z = paintPositions[i * 3 + 2];
+
+    ray.origin.set(x, y, maxZ + zSpan);
+    ray.direction.set(0, 0, -1);
+
+    const hit = bvh.raycastFirst(ray, THREE.DoubleSide);
+    if (hit) {
+      result[i] = z - hit.point.z;
+    } else {
+      result[i] = NaN;
+    }
+  }
+
+  refGeo.dispose();
+  return result;
+}
+
 interface SurfaceMeshProps {
   upload: UploadedSurface;
   style: ObjectStyle;
@@ -176,12 +195,12 @@ interface SurfaceMeshProps {
   onHover: (info: TooltipInfo | null) => void;
   onSelect: (id: string, info: SelectionInfo) => void;
   domainMap?: Uint8Array;
-  thicknessMap?: Float32Array;
-  thicknessMode?: ThicknessMode | null;
   domainVisible?: Set<string>;
+  heatmapVertexThickness?: Float32Array | null;
+  heatmapMode?: HeatmapMode | null;
 }
 
-function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, isDark, domainMap, domainVisible, thicknessMap, thicknessMode }: SurfaceMeshProps) {
+function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, isDark, domainMap, domainVisible, heatmapVertexThickness, heatmapMode }: SurfaceMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const matRef = useRef<THREE.MeshPhongMaterial>(null);
 
@@ -195,7 +214,10 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
     return { geometry: geo, triCount: upload.triangleCount };
   }, [upload]);
 
+  const isHeatmapActive = !!(heatmapMode && heatmapVertexThickness && heatmapMode.paintRole === upload.role);
+
   const paintedGeo = useMemo(() => {
+    if (isHeatmapActive) return null;
     if (!domainMap || domainMap.length === 0) return null;
     const nonIndexed = geometry.toNonIndexed();
     const positions = nonIndexed.attributes.position.array as Float32Array;
@@ -208,40 +230,55 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
     nonIndexed.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     (nonIndexed as any).boundsTree = new MeshBVH(nonIndexed);
     return nonIndexed;
-  }, [geometry, domainMap]);
+  }, [geometry, domainMap, isHeatmapActive]);
+
+  const heatmapGeo = useMemo(() => {
+    if (!isHeatmapActive || !heatmapVertexThickness) return null;
+    const geo = geometry.clone();
+    const count = geo.attributes.position.count;
+    const colors = new Float32Array(count * 3);
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    (geo as any).boundsTree = new MeshBVH(geo);
+    return geo;
+  }, [geometry, isHeatmapActive, heatmapVertexThickness]);
 
   useEffect(() => {
+    if (!heatmapGeo || !heatmapVertexThickness || !heatmapMode) return;
+    const colorAttr = heatmapGeo.attributes.color as THREE.BufferAttribute;
+    const arr = colorAttr.array as Float32Array;
+    const { scaleMin, scaleMax } = heatmapMode;
+    const range = scaleMax - scaleMin;
+
+    for (let i = 0; i < heatmapVertexThickness.length; i++) {
+      const dz = heatmapVertexThickness[i];
+      let r: number, g: number, b: number;
+      if (isNaN(dz)) {
+        r = 0.3; g = 0.3; b = 0.3;
+      } else {
+        const t = range > 0 ? (dz - scaleMin) / range : 0.5;
+        [r, g, b] = sampleHeatmapRamp(t);
+      }
+      arr[i * 3] = r;
+      arr[i * 3 + 1] = g;
+      arr[i * 3 + 2] = b;
+    }
+    colorAttr.needsUpdate = true;
+  }, [heatmapGeo, heatmapVertexThickness, heatmapMode]);
+
+  useEffect(() => {
+    if (isHeatmapActive) return;
     if (!paintedGeo || !domainMap) return;
     const colorAttr = paintedGeo.attributes.color as THREE.BufferAttribute;
     const arr = colorAttr.array as Float32Array;
     const defaultColor = new THREE.Color(style.color);
 
-    const activeThickness = thicknessMode && thicknessMap;
-    const targetDomainIdx = activeThickness ? DOMAIN_NAME_TO_INDEX[thicknessMode!.domain] : undefined;
-
     for (let ti = 0; ti < domainMap.length; ti++) {
       const idx = domainMap[ti];
       let r: number, g: number, b: number;
-      let alpha = 1.0;
 
-      if (activeThickness && targetDomainIdx !== undefined) {
-        if (idx === targetDomainIdx) {
-          const thick = thicknessMap![ti] || 0;
-          if (thicknessMode!.hideBelow !== null && thick < thicknessMode!.hideBelow) {
-            alpha = 0;
-            r = 0; g = 0; b = 0;
-          } else {
-            const range = thicknessMode!.scaleMax - thicknessMode!.scaleMin;
-            const t = range > 0 ? (thick - thicknessMode!.scaleMin) / range : 0;
-            [r, g, b] = sampleRamp(t);
-          }
-        } else {
-          r = defaultColor.r * 0.3;
-          g = defaultColor.g * 0.3;
-          b = defaultColor.b * 0.3;
-          alpha = 0.05;
-        }
-      } else if (idx > 0 && idx < DOMAIN_INDEX_MAP.length) {
+      if (idx > 0 && idx < DOMAIN_INDEX_MAP.length) {
         const c = DOMAIN_INDEX_MAP[idx].color;
         r = c.r; g = c.g; b = c.b;
       } else {
@@ -250,22 +287,22 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
 
       const vi = ti * 3;
       for (let v = 0; v < 3; v++) {
-        arr[(vi + v) * 3] = alpha > 0 ? r : 0;
-        arr[(vi + v) * 3 + 1] = alpha > 0 ? g : 0;
-        arr[(vi + v) * 3 + 2] = alpha > 0 ? b : 0;
+        arr[(vi + v) * 3] = r;
+        arr[(vi + v) * 3 + 1] = g;
+        arr[(vi + v) * 3 + 2] = b;
       }
     }
     colorAttr.needsUpdate = true;
-  }, [paintedGeo, domainMap, style.color, thicknessMap, thicknessMode]);
+  }, [paintedGeo, domainMap, style.color, isHeatmapActive]);
 
-  const isPainted = !!paintedGeo;
-  const activeGeo = paintedGeo ?? geometry;
+  const isPainted = isHeatmapActive ? true : !!paintedGeo;
+  const activeGeo = isHeatmapActive ? (heatmapGeo ?? geometry) : (paintedGeo ?? geometry);
 
   useEffect(() => {
     if (!matRef.current) return;
     if (isPainted) {
       matRef.current.color.set('#ffffff');
-      matRef.current.opacity = 0.92;
+      matRef.current.opacity = 0.95;
       matRef.current.transparent = true;
     } else {
       const c = new THREE.Color(style.color);
@@ -292,38 +329,33 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
     return { vertexCount: upload.vertexCount, triangleCount: upload.triangleCount, bbox: box };
   }, [upload]);
 
+  const getThicknessAtFace = useCallback((faceIndex: number): number | undefined => {
+    if (!heatmapVertexThickness || !isHeatmapActive) return undefined;
+    const idx = upload.indices;
+    const i0 = idx[faceIndex * 3], i1 = idx[faceIndex * 3 + 1], i2 = idx[faceIndex * 3 + 2];
+    const t0 = heatmapVertexThickness[i0], t1 = heatmapVertexThickness[i1], t2 = heatmapVertexThickness[i2];
+    const vals = [t0, t1, t2].filter(v => !isNaN(v));
+    return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : undefined;
+  }, [heatmapVertexThickness, isHeatmapActive, upload.indices]);
+
+  const handlePointerEvent = useCallback((e: any) => {
+    e.stopPropagation();
+    const thick = e.faceIndex != null ? getThicknessAtFace(e.faceIndex) : undefined;
+    onHover({
+      x: e.clientX, y: e.clientY, domain: roleLabel, volume: 0,
+      surfaceFileName: upload.fileName, surfaceRoleLabel: roleLabel,
+      thickness: thick,
+    });
+  }, [roleLabel, upload.fileName, getThicknessAtFace, onHover]);
+
   return (
     <group>
       <mesh
         ref={meshRef}
         geometry={activeGeo}
         frustumCulled
-        onPointerOver={(e) => {
-          e.stopPropagation();
-          let thick: number | undefined;
-          if (thicknessMode && thicknessMap && e.faceIndex != null) {
-            const fi = isPainted ? e.faceIndex : e.faceIndex;
-            thick = thicknessMap[fi];
-          }
-          onHover({
-            x: e.clientX, y: e.clientY, domain: roleLabel, volume: 0,
-            surfaceFileName: upload.fileName, surfaceRoleLabel: roleLabel,
-            thickness: thick,
-          });
-        }}
-        onPointerMove={(e) => {
-          e.stopPropagation();
-          let thick: number | undefined;
-          if (thicknessMode && thicknessMap && e.faceIndex != null) {
-            const fi = isPainted ? e.faceIndex : e.faceIndex;
-            thick = thicknessMap[fi];
-          }
-          onHover({
-            x: e.clientX, y: e.clientY, domain: roleLabel, volume: 0,
-            surfaceFileName: upload.fileName, surfaceRoleLabel: roleLabel,
-            thickness: thick,
-          });
-        }}
+        onPointerOver={handlePointerEvent}
+        onPointerMove={handlePointerEvent}
         onPointerOut={() => onHover(null)}
         onClick={(e) => {
           e.stopPropagation();
@@ -338,7 +370,7 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
           ref={matRef}
           color={isPainted ? '#ffffff' : style.color}
           vertexColors={isPainted}
-          opacity={isPainted ? 0.92 : style.opacity}
+          opacity={isPainted ? 0.95 : style.opacity}
           transparent={isPainted || style.opacity < 1}
           side={THREE.DoubleSide}
           flatShading={false}
@@ -346,9 +378,10 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
           polygonOffset
           polygonOffsetFactor={1}
           polygonOffsetUnits={1}
+          wireframe={style.wireframe}
         />
       </mesh>
-      <CreaseEdges geometry={activeGeo} visible={style.wireframe} isDark={isDark} />
+      <CreaseEdges geometry={activeGeo} visible={style.wireframe && !isHeatmapActive} isDark={isDark} />
     </group>
   );
 }
@@ -1286,8 +1319,7 @@ export interface ViewerProps {
   savedMeasurements: SavedMeasurement[];
   showPerf: boolean;
   domainMaps: Map<SurfaceRole, Uint8Array>;
-  thicknessMaps: Map<SurfaceRole, Float32Array>;
-  thicknessMode: ThicknessMode | null;
+  heatmapMode: HeatmapMode | null;
 }
 
 const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
@@ -1295,7 +1327,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   uploads, surfaceVisible, isDrawingSection, sectionLine, onSectionLineChange,
   onSectionDrawComplete, background, domainStyles, surfaceStyles, selectedId,
   onSelect, measureTool, measurePoints, onAddMeasurePoint, savedMeasurements, showPerf,
-  domainMaps, thicknessMaps, thicknessMode,
+  domainMaps, heatmapMode,
 }, ref) {
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null);
   const [isDraggingEndpoint, setIsDraggingEndpoint] = useState(false);
@@ -1313,6 +1345,17 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   useImperativeHandle(ref, () => ({
     applyPreset: (preset: ViewPreset) => setViewPreset(preset),
   }), []);
+
+  const heatmapThickness = useMemo(() => {
+    if (!heatmapMode) return null;
+    const paintUpload = uploads.get(heatmapMode.paintRole);
+    const refUpload = uploads.get(heatmapMode.refRole);
+    if (!paintUpload || !refUpload) return null;
+    return computePerVertexThickness(
+      paintUpload.positions, paintUpload.vertexCount,
+      refUpload.positions, refUpload.indices,
+    );
+  }, [heatmapMode?.paintRole, heatmapMode?.refRole, uploads]);
 
   const domainGroups = useMemo(() => {
     const groups = new Map<string, FlatDomainSolid[]>();
@@ -1460,8 +1503,8 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
               onSelect={handleMeshClick}
               domainMap={domainMaps.get(role)}
               domainVisible={visible}
-              thicknessMap={thicknessMaps.get(role)}
-              thicknessMode={thicknessMode}
+              heatmapVertexThickness={heatmapThickness}
+              heatmapMode={heatmapMode}
             />
           );
         })}
@@ -1518,14 +1561,10 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
         <KeyboardShortcuts controlsRef={controlsRef} flatDomains={flatDomains} uploads={uploads} onTogglePivot={togglePivot} />
       </Canvas>
 
-      {/* Thickness Legend */}
-      {thicknessMode && (
+      {heatmapMode && (
         <ThicknessLegend
-          domainLabel={
-            DOMAIN_INDEX_MAP[DOMAIN_NAME_TO_INDEX[thicknessMode.domain] ?? 0]?.label ?? thicknessMode.domain
-          }
-          scaleMin={thicknessMode.scaleMin}
-          scaleMax={thicknessMode.scaleMax}
+          scaleMin={heatmapMode.scaleMin}
+          scaleMax={heatmapMode.scaleMax}
           isDark={isDark}
         />
       )}
@@ -1541,8 +1580,11 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
               <div className="font-medium">
                 {tooltip.surfaceFileName} &mdash; {tooltip.surfaceRoleLabel}
               </div>
-              {tooltip.thickness !== undefined && tooltip.thickness > 0 && (
-                <div className="text-cyan-300">Thickness: {tooltip.thickness.toFixed(1)}m</div>
+              {tooltip.thickness !== undefined && !isNaN(tooltip.thickness) && (
+                <div className="text-cyan-300">
+                  dZ: {tooltip.thickness > 0 ? '+' : ''}{tooltip.thickness.toFixed(2)}m
+                  {tooltip.thickness > 0 ? ' (underdig)' : tooltip.thickness < 0 ? ' (overdig)' : ''}
+                </div>
               )}
             </>
           ) : (

@@ -13,6 +13,7 @@ import type {
   MeasureTool,
   ViewerBackground,
   SolidMesh,
+  HeatmapMode,
 } from './types';
 import { DEFAULT_SETTINGS, SURFACE_ROLES } from './types';
 import { initWasm, runConformance, runConformanceWithBoundaries, parseSurfaces } from './wasm';
@@ -126,14 +127,8 @@ export default function App() {
   const [showPerf, setShowPerf] = useState(false);
   const [progress, setProgress] = useState<{ phase: string; value: number } | null>(null);
   const [domainMaps, setDomainMaps] = useState<Map<SurfaceRole, Uint8Array>>(new Map());
-  const [thicknessMaps, setThicknessMaps] = useState<Map<SurfaceRole, Float32Array>>(new Map());
 
-  const [thicknessMode, setThicknessMode] = useState<{
-    domain: string;
-    scaleMin: number;
-    scaleMax: number;
-    hideBelow: number | null;
-  } | null>(null);
+  const [heatmapMode, setHeatmapMode] = useState<HeatmapMode | null>(null);
 
 
   useEffect(() => {
@@ -382,15 +377,7 @@ export default function App() {
           }
           setDomainMaps(maps);
         }
-        if (flatResult.thicknessMaps) {
-          const maps = new Map<SurfaceRole, Float32Array>();
-          for (const [role, arr] of Object.entries(flatResult.thicknessMaps)) {
-            if (arr && arr.length > 0) {
-              maps.set(role as SurfaceRole, arr);
-            }
-          }
-          setThicknessMaps(maps);
-        }
+        // thicknessMaps from WASM are no longer used - heatmap computes per-vertex thickness on the frontend
       } else {
         await new Promise((r) => requestAnimationFrame(r));
 
@@ -656,8 +643,7 @@ export default function App() {
               setResult(null);
               setFlatDomains([]);
               setDomainMaps(new Map());
-              setThicknessMaps(new Map());
-              setThicknessMode(null);
+              setHeatmapMode(null);
               setUploads(new Map());
               setBoundaries([]);
               setMainTab('viewer');
@@ -886,10 +872,8 @@ export default function App() {
               surfaceStyles={surfaceStyles}
               onDomainStyleChange={handleDomainStyleChange}
               onSurfaceStyleChange={handleSurfaceStyleChange}
-              thicknessMode={thicknessMode}
-              onThicknessModeChange={setThicknessMode}
-              domainMaps={domainMaps}
-              thicknessMaps={thicknessMaps}
+              heatmapMode={heatmapMode}
+              onHeatmapModeChange={setHeatmapMode}
             />
           )}
         </aside>
@@ -977,9 +961,7 @@ export default function App() {
                         savedMeasurements={savedMeasurements}
                         showPerf={showPerf}
                         domainMaps={domainMaps}
-                        thicknessMaps={thicknessMaps}
-
-                        thicknessMode={thicknessMode}
+                        heatmapMode={heatmapMode}
                       />
                     </div>
                   )}

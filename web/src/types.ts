@@ -98,6 +98,13 @@ export interface ObjectStyle {
   wireframe: boolean;
 }
 
+export interface HeatmapMode {
+  paintRole: SurfaceRole;
+  refRole: SurfaceRole;
+  scaleMin: number;
+  scaleMax: number;
+}
+
 export type MeasureTool = 'none' | 'distance' | 'elevation' | 'area';
 export type ViewPreset = 'plan' | 'north' | 'east' | 'isometric' | 'fit';
 export type ViewerBackground = 'dark' | 'light';
