@@ -80,27 +80,6 @@ const DEFAULT_SURFACE_COLORS: Record<SurfaceRole, string> = {
   schedule_future: '#a78bfa',
 };
 
-interface DomainIndexInfo {
-  domain: string;
-  label: string;
-  color: THREE.Color;
-}
-
-const DOMAIN_INDEX_MAP: DomainIndexInfo[] = [
-  { domain: '', label: '', color: new THREE.Color(0x808080) },
-  { domain: 'PlannedAndMined', label: 'Planned and Mined', color: new THREE.Color('#4CAF50') },
-  { domain: 'PlannedNotMined', label: 'Planned Not Mined', color: new THREE.Color('#FFEB3B') },
-  { domain: 'MinedNotPlanned', label: 'Mined Not Planned', color: new THREE.Color('#F44336') },
-  { domain: 'MinedBeforeStart', label: 'Mined Before Start', color: new THREE.Color('#9C27B0') },
-  { domain: 'PrescheduleDelay', label: 'Preschedule Delay', color: new THREE.Color('#FF9800') },
-  { domain: 'AheadOfPlan', label: 'Ahead of Plan', color: new THREE.Color('#2196F3') },
-  { domain: 'PlannedAndDumped', label: 'Planned and Dumped', color: new THREE.Color('#66BB6A') },
-  { domain: 'PlannedNotDumped', label: 'Planned Not Dumped', color: new THREE.Color('#FFF176') },
-  { domain: 'DumpedNotPlanned', label: 'Dumped Not Planned', color: new THREE.Color('#EF5350') },
-  { domain: 'DumpedBeforeStart', label: 'Dumped Before Start', color: new THREE.Color('#AB47BC') },
-  { domain: 'DumpPrescheduleDelay', label: 'Dump Preschedule Delay', color: new THREE.Color('#FFA726') },
-  { domain: 'DumpedAheadOfPlan', label: 'Dumped Ahead of Plan', color: new THREE.Color('#42A5F5') },
-];
 
 const BG_COLORS: Record<ViewerBackground, string> = {
   dark: '#1a1a1a',
@@ -216,22 +195,6 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
 
   const isHeatmapActive = !!(heatmapMode && heatmapVertexThickness && heatmapMode.paintRole === upload.role);
 
-  const paintedGeo = useMemo(() => {
-    if (isHeatmapActive) return null;
-    if (!domainMap || domainMap.length === 0) return null;
-    const nonIndexed = geometry.toNonIndexed();
-    const positions = nonIndexed.attributes.position.array as Float32Array;
-    nonIndexed.setAttribute('normal', new THREE.BufferAttribute(
-      computeSmoothNormals(positions), 3,
-    ));
-    nonIndexed.computeBoundingSphere();
-    const count = nonIndexed.attributes.position.count;
-    const colors = new Float32Array(count * 3);
-    nonIndexed.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    (nonIndexed as any).boundsTree = new MeshBVH(nonIndexed);
-    return nonIndexed;
-  }, [geometry, domainMap, isHeatmapActive]);
-
   const heatmapGeo = useMemo(() => {
     if (!isHeatmapActive || !heatmapVertexThickness) return null;
     const geo = geometry.clone();
@@ -267,36 +230,8 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
     colorAttr.needsUpdate = true;
   }, [heatmapGeo, heatmapVertexThickness, heatmapMode]);
 
-  useEffect(() => {
-    if (isHeatmapActive) return;
-    if (!paintedGeo || !domainMap) return;
-    const colorAttr = paintedGeo.attributes.color as THREE.BufferAttribute;
-    const arr = colorAttr.array as Float32Array;
-    const defaultColor = new THREE.Color(style.color);
-
-    for (let ti = 0; ti < domainMap.length; ti++) {
-      const idx = domainMap[ti];
-      let r: number, g: number, b: number;
-
-      if (idx > 0 && idx < DOMAIN_INDEX_MAP.length) {
-        const c = DOMAIN_INDEX_MAP[idx].color;
-        r = c.r; g = c.g; b = c.b;
-      } else {
-        r = defaultColor.r; g = defaultColor.g; b = defaultColor.b;
-      }
-
-      const vi = ti * 3;
-      for (let v = 0; v < 3; v++) {
-        arr[(vi + v) * 3] = r;
-        arr[(vi + v) * 3 + 1] = g;
-        arr[(vi + v) * 3 + 2] = b;
-      }
-    }
-    colorAttr.needsUpdate = true;
-  }, [paintedGeo, domainMap, style.color, isHeatmapActive]);
-
-  const isPainted = isHeatmapActive ? true : !!paintedGeo;
-  const activeGeo = isHeatmapActive ? (heatmapGeo ?? geometry) : (paintedGeo ?? geometry);
+  const isPainted = isHeatmapActive;
+  const activeGeo = isHeatmapActive ? (heatmapGeo ?? geometry) : geometry;
 
   useEffect(() => {
     if (!matRef.current) return;
@@ -378,10 +313,9 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
           polygonOffset
           polygonOffsetFactor={1}
           polygonOffsetUnits={1}
-          wireframe={style.wireframe}
         />
       </mesh>
-      <CreaseEdges geometry={activeGeo} visible={style.wireframe && !isHeatmapActive} isDark={isDark} />
+      <CreaseEdges geometry={activeGeo} visible={style.wireframe} isDark={isDark} />
     </group>
   );
 }
