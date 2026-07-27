@@ -12,6 +12,7 @@ import type {
   ViewPreset,
   ViewerBackground,
   HeatmapMode,
+  ReferenceLayer,
 } from '../types';
 import { SURFACE_ROLES } from '../types';
 import type { FlatDomainSolid } from '../workers/engineClient';
@@ -1223,6 +1224,71 @@ function CursorElevation({
   return null;
 }
 
+function RefSurfaceMesh({ layer, isDark }: { layer: ReferenceLayer; isDark: boolean }) {
+  const surf = layer.surface;
+  if (!surf) return null;
+
+  const geometry = useMemo(() => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(surf.positions, 3));
+    geo.setIndex(new THREE.BufferAttribute(surf.indices, 1));
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    return geo;
+  }, [surf]);
+
+  return (
+    <group visible={layer.visible}>
+      <mesh geometry={geometry}>
+        <meshPhongMaterial
+          color={layer.style.color}
+          opacity={layer.style.opacity}
+          transparent={layer.style.opacity < 1}
+          side={THREE.DoubleSide}
+          depthWrite={layer.style.opacity >= 0.95}
+          polygonOffset
+          polygonOffsetFactor={1}
+          polygonOffsetUnits={1}
+        />
+      </mesh>
+      <CreaseEdges geometry={geometry} visible={layer.style.wireframe} isDark={isDark} />
+    </group>
+  );
+}
+
+function RefPolylinesMesh({ layer }: { layer: ReferenceLayer }) {
+  if (!layer.polylines || layer.polylines.length === 0) return null;
+
+  const lineData = useMemo(() => {
+    return layer.polylines!.map(pl => {
+      const pts: [number, number, number][] = [];
+      for (let i = 0; i < pl.pointCount; i++) {
+        pts.push([pl.points[i * 3], pl.points[i * 3 + 1], pl.points[i * 3 + 2]]);
+      }
+      if (pl.closed && pts.length > 0) pts.push(pts[0]);
+      return { points: pts, color: pl.color, name: pl.name };
+    });
+  }, [layer.polylines]);
+
+  return (
+    <group visible={layer.visible}>
+      {lineData.map((ld, i) => (
+        <Line
+          key={i}
+          points={ld.points}
+          color={layer.style.color !== '#cccccc' ? layer.style.color : ld.color}
+          lineWidth={layer.style.lineWidth}
+          dashed={layer.style.lineDash.length > 0}
+          dashSize={layer.style.lineDash[0] ?? 1}
+          gapSize={layer.style.lineDash[1] ?? 0}
+          opacity={layer.style.opacity}
+          transparent={layer.style.opacity < 1}
+        />
+      ))}
+    </group>
+  );
+}
+
 export interface ViewerHandle {
   applyPreset: (preset: ViewPreset) => void;
 }
@@ -1254,6 +1320,8 @@ export interface ViewerProps {
   showPerf: boolean;
   domainMaps: Map<SurfaceRole, Uint8Array>;
   heatmapMode: HeatmapMode | null;
+  refLayers: ReferenceLayer[];
+  onRefDrop: (files: FileList) => void;
 }
 
 const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
@@ -1261,7 +1329,7 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
   uploads, surfaceVisible, isDrawingSection, sectionLine, onSectionLineChange,
   onSectionDrawComplete, background, domainStyles, surfaceStyles, selectedId,
   onSelect, measureTool, measurePoints, onAddMeasurePoint, savedMeasurements, showPerf,
-  domainMaps, heatmapMode,
+  domainMaps, heatmapMode, refLayers, onRefDrop,
 }, ref) {
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null);
   const [isDraggingEndpoint, setIsDraggingEndpoint] = useState(false);
@@ -1350,8 +1418,56 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
 
   const isDark = background === 'dark';
 
+  const [dragOver, setDragOver] = useState(false);
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const hasRef = Array.from(e.dataTransfer.items).some(item => {
+      if (item.kind !== 'file') return false;
+      const name = (item as any).name ?? item.type ?? '';
+      return /\.(00t|dxf|arch_d)$/i.test(name);
+    });
+    if (hasRef || e.dataTransfer.types.includes('Files')) {
+      e.dataTransfer.dropEffect = 'copy';
+      setDragOver(true);
+    }
+  }, []);
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+  }, []);
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    if (e.dataTransfer.files.length > 0) {
+      const refFiles: File[] = [];
+      for (let i = 0; i < e.dataTransfer.files.length; i++) {
+        const f = e.dataTransfer.files[i];
+        if (/\.(00t|dxf|arch_d)$/i.test(f.name)) refFiles.push(f);
+      }
+      if (refFiles.length > 0) {
+        const dt = new DataTransfer();
+        for (const f of refFiles) dt.items.add(f);
+        onRefDrop(dt.files);
+      }
+    }
+  }, [onRefDrop]);
+
   return (
-    <div className={`relative h-full w-full ${isDark ? 'bg-[#1a1a1a]' : 'bg-white'}`}>
+    <div
+      className={`relative h-full w-full ${isDark ? 'bg-[#1a1a1a]' : 'bg-white'}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {dragOver && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-indigo-900/30 border-2 border-dashed border-indigo-400 rounded">
+          <span className="rounded-lg bg-slate-900/80 px-4 py-2 text-sm font-medium text-indigo-300">
+            Drop reference files (.00t, .dxf, .arch_d)
+          </span>
+        </div>
+      )}
       <PerformanceOverlay visible={showPerf} isDark={isDark} />
 
       {/* View preset buttons */}
@@ -1442,6 +1558,14 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
             />
           );
         })}
+
+        {refLayers.map(layer => (
+          layer.kind === 'surface' && layer.surface ? (
+            <RefSurfaceMesh key={layer.id} layer={layer} isDark={isDark} />
+          ) : layer.kind === 'lines' && layer.polylines ? (
+            <RefPolylinesMesh key={layer.id} layer={layer} />
+          ) : null
+        ))}
 
         <SectionLineOverlay
           sectionLine={sectionLine}

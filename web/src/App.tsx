@@ -14,6 +14,8 @@ import type {
   ViewerBackground,
   SolidMesh,
   HeatmapMode,
+  ReferenceLayer,
+  RefLayerStyle,
 } from './types';
 import { DEFAULT_SETTINGS, SURFACE_ROLES } from './types';
 import { initWasm, runConformance, runConformanceWithBoundaries, parseSurfaces } from './wasm';
@@ -38,6 +40,9 @@ import type { ViewerHandle, SelectionInfo, MeasurePoint, SavedMeasurement } from
 import CrossSectionPanel from './components/CrossSectionPanel';
 import ReportPanel from './components/report/ReportPanel';
 import { computeCrossSection } from './utils/crossSection';
+import { parseOot } from './utils/ootParser';
+import { parseDxf } from './utils/dxfRefParser';
+import { parseArchd } from './utils/archdParser';
 import DomainLegend from './components/DomainLegend';
 
 
@@ -129,6 +134,8 @@ export default function App() {
   const [domainMaps, setDomainMaps] = useState<Map<SurfaceRole, Uint8Array>>(new Map());
 
   const [heatmapMode, setHeatmapMode] = useState<HeatmapMode | null>(null);
+  const [refLayers, setRefLayers] = useState<ReferenceLayer[]>([]);
+  const refIdRef = useRef(0);
 
 
   useEffect(() => {
@@ -543,6 +550,77 @@ export default function App() {
     });
   }, []);
 
+  const handleRefDrop = useCallback(async (files: FileList) => {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+      const id = `ref-${++refIdRef.current}`;
+      const defaultStyle: RefLayerStyle = { color: '#cccccc', opacity: 0.6, wireframe: false, lineWidth: 2, lineDash: [] };
+
+      try {
+        if (ext === '00t') {
+          const buf = await file.arrayBuffer();
+          const parsed = parseOot(buf);
+          setRefLayers(prev => [...prev, {
+            id, fileName: file.name, kind: 'surface', visible: true,
+            style: { ...defaultStyle, color: '#9ca3af' },
+            surface: parsed,
+          }]);
+        } else if (ext === 'dxf') {
+          const text = await file.text();
+          const parsed = parseDxf(text);
+          if (parsed.surfaces.length > 0) {
+            for (const surf of parsed.surfaces) {
+              const sid = `ref-${++refIdRef.current}`;
+              setRefLayers(prev => [...prev, {
+                id: sid, fileName: file.name, kind: 'surface', visible: true,
+                style: { ...defaultStyle, color: '#9ca3af' },
+                surface: surf,
+              }]);
+            }
+          }
+          if (parsed.polylines.length > 0) {
+            setRefLayers(prev => [...prev, {
+              id, fileName: file.name, kind: 'lines', visible: true,
+              style: defaultStyle,
+              polylines: parsed.polylines.map(p => ({
+                points: p.points, pointCount: p.pointCount, closed: p.closed,
+                color: p.color, layer: p.layer, name: p.layer || file.name,
+              })),
+            }]);
+          }
+        } else if (ext === 'arch_d') {
+          const text = await file.text();
+          const parsed = parseArchd(text);
+          if (parsed.polylines.length > 0) {
+            setRefLayers(prev => [...prev, {
+              id, fileName: file.name, kind: 'lines', visible: true,
+              style: defaultStyle,
+              polylines: parsed.polylines.map(p => ({
+                points: p.points, pointCount: p.pointCount, closed: p.closed,
+                color: p.color, layer: p.group || p.feature, name: p.name || p.feature,
+              })),
+            }]);
+          }
+        }
+      } catch (err) {
+        console.error(`Failed to parse reference file ${file.name}:`, err);
+      }
+    }
+  }, []);
+
+  const handleRefToggle = useCallback((id: string) => {
+    setRefLayers(prev => prev.map(l => l.id === id ? { ...l, visible: !l.visible } : l));
+  }, []);
+
+  const handleRefStyleChange = useCallback((id: string, style: RefLayerStyle) => {
+    setRefLayers(prev => prev.map(l => l.id === id ? { ...l, style } : l));
+  }, []);
+
+  const handleRefRemove = useCallback((id: string) => {
+    setRefLayers(prev => prev.filter(l => l.id !== id));
+  }, []);
+
   const crossSectionData = useMemo(() => {
     if (!sectionLine || !result) return null;
     return computeCrossSection(uploads, result.domains, sectionLine[0], sectionLine[1]);
@@ -644,6 +722,7 @@ export default function App() {
               setFlatDomains([]);
               setDomainMaps(new Map());
               setHeatmapMode(null);
+              setRefLayers([]);
               setUploads(new Map());
               setBoundaries([]);
               setMainTab('viewer');
@@ -874,6 +953,10 @@ export default function App() {
               onSurfaceStyleChange={handleSurfaceStyleChange}
               heatmapMode={heatmapMode}
               onHeatmapModeChange={setHeatmapMode}
+              refLayers={refLayers}
+              onRefToggle={handleRefToggle}
+              onRefStyleChange={handleRefStyleChange}
+              onRefRemove={handleRefRemove}
             />
           )}
         </aside>
@@ -915,6 +998,7 @@ export default function App() {
                         onSelectProfile={(role) => setSelectedId(`surface:${role}`)}
                         onSelectSolid={(domain) => setSelectedId(`domain:${domain}`)}
                         onStepSection={handleStepSection}
+                        refLayers={refLayers}
                       />
                     </div>
                   ) : (
@@ -962,6 +1046,8 @@ export default function App() {
                         showPerf={showPerf}
                         domainMaps={domainMaps}
                         heatmapMode={heatmapMode}
+                        refLayers={refLayers}
+                        onRefDrop={handleRefDrop}
                       />
                     </div>
                   )}

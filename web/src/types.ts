@@ -105,6 +105,42 @@ export interface HeatmapMode {
   scaleMax: number;
 }
 
+export type RefLayerKind = 'surface' | 'lines';
+
+export interface RefSurfaceData {
+  positions: Float32Array;
+  indices: Uint32Array;
+  vertexCount: number;
+  triangleCount: number;
+}
+
+export interface RefPolylineData {
+  points: Float32Array;
+  pointCount: number;
+  closed: boolean;
+  color: string;
+  layer: string;
+  name: string;
+}
+
+export interface RefLayerStyle {
+  color: string;
+  opacity: number;
+  wireframe: boolean;
+  lineWidth: number;
+  lineDash: number[];
+}
+
+export interface ReferenceLayer {
+  id: string;
+  fileName: string;
+  kind: RefLayerKind;
+  visible: boolean;
+  style: RefLayerStyle;
+  surface?: RefSurfaceData;
+  polylines?: RefPolylineData[];
+}
+
 export type MeasureTool = 'none' | 'distance' | 'elevation' | 'area';
 export type ViewPreset = 'plan' | 'north' | 'east' | 'isometric' | 'fit';
 export type ViewerBackground = 'dark' | 'light';

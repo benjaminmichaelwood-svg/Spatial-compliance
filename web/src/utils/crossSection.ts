@@ -178,6 +178,25 @@ function computeSolidSections(
   return polygons;
 }
 
+export function computeSurfaceProfileFromArrays(
+  positions: Float32Array,
+  indices: Uint32Array,
+  vertexCount: number,
+  triangleCount: number,
+  p1: [number, number],
+  p2: [number, number],
+): SectionPoint[] {
+  const verts: Vec3[] = [];
+  for (let i = 0; i < vertexCount; i++) {
+    verts.push({ x: positions[i * 3], y: positions[i * 3 + 1], z: positions[i * 3 + 2] });
+  }
+  const idxs: [number, number, number][] = [];
+  for (let i = 0; i < triangleCount; i++) {
+    idxs.push([indices[i * 3], indices[i * 3 + 1], indices[i * 3 + 2]]);
+  }
+  return computeSurfaceProfile(verts, idxs, p1, p2);
+}
+
 export function computeCrossSection(
   uploads: Map<SurfaceRole, UploadedSurface>,
   domains: DomainSolid[],

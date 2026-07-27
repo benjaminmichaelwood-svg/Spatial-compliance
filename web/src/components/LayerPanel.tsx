@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
-import type { ConformanceResult, SurfaceRole, UploadedSurface, ObjectStyle, HeatmapMode } from '../types';
+import type { ConformanceResult, SurfaceRole, UploadedSurface, ObjectStyle, HeatmapMode, ReferenceLayer, RefLayerStyle } from '../types';
 import { SURFACE_ROLES } from '../types';
 
 const DEFAULT_SURFACE_COLORS: Record<SurfaceRole, string> = {
@@ -23,6 +23,10 @@ interface Props {
   onSurfaceStyleChange: (role: SurfaceRole, style: ObjectStyle) => void;
   heatmapMode: HeatmapMode | null;
   onHeatmapModeChange: (mode: HeatmapMode | null) => void;
+  refLayers: ReferenceLayer[];
+  onRefToggle: (id: string) => void;
+  onRefStyleChange: (id: string, style: RefLayerStyle) => void;
+  onRefRemove: (id: string) => void;
 }
 
 function formatVolume(v: number): string {
@@ -96,10 +100,13 @@ export default function LayerPanel({
   result, visible, onToggle, uploads, surfaceVisible, onToggleSurface,
   domainStyles, surfaceStyles, onDomainStyleChange, onSurfaceStyleChange,
   heatmapMode, onHeatmapModeChange,
+  refLayers, onRefToggle, onRefStyleChange, onRefRemove,
 }: Props) {
   const [expandedDomain, setExpandedDomain] = useState<string | null>(null);
   const [expandedSurface, setExpandedSurface] = useState<SurfaceRole | null>(null);
   const [inputSurfacesCollapsed, setInputSurfacesCollapsed] = useState(true);
+  const [refCollapsed, setRefCollapsed] = useState(false);
+  const [expandedRef, setExpandedRef] = useState<string | null>(null);
 
   const grouped = new Map<string, { color: string; label: string; totalVolume: number; count: number }>();
   for (const d of result.domains) {
@@ -413,6 +420,159 @@ export default function LayerPanel({
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Reference Layers */}
+      {refLayers.length > 0 && (
+        <div className="mt-3 rounded-lg bg-slate-800/50 p-3">
+          <button
+            type="button"
+            className="mb-2 flex w-full items-center justify-between"
+            onClick={() => setRefCollapsed(c => !c)}
+          >
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+              Reference Layers
+            </span>
+            <svg
+              className={`h-3 w-3 text-slate-500 transition-transform ${refCollapsed ? '-rotate-90' : ''}`}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+            >
+              <path strokeLinecap="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {!refCollapsed && (
+            <div className="space-y-0.5">
+              {refLayers.map((layer) => {
+                const isExpanded = expandedRef === layer.id;
+                return (
+                  <div key={layer.id}>
+                    <div className="flex items-center gap-1.5 rounded px-1 py-0.5 hover:bg-slate-700/50">
+                      <button
+                        type="button"
+                        onClick={() => onRefToggle(layer.id)}
+                        className={`h-3 w-3 flex-shrink-0 rounded-sm border ${
+                          layer.visible
+                            ? 'border-indigo-500 bg-indigo-500'
+                            : 'border-slate-600 bg-transparent'
+                        }`}
+                        title={layer.visible ? 'Hide' : 'Show'}
+                      >
+                        {layer.visible && (
+                          <svg className="h-full w-full text-white" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth={2}>
+                            <path d="M2 6l3 3 5-5" />
+                          </svg>
+                        )}
+                      </button>
+                      <span
+                        className="inline-block h-2.5 w-4 flex-shrink-0 rounded-sm"
+                        style={{ backgroundColor: layer.style.color, opacity: layer.style.opacity }}
+                      />
+                      <span className="flex-1 truncate text-[10px] text-slate-300">
+                        {layer.fileName}
+                      </span>
+                      <span className="text-[8px] text-slate-500 uppercase">{layer.kind === 'surface' ? 'srf' : 'str'}</span>
+                      <button
+                        type="button"
+                        onClick={() => setExpandedRef(isExpanded ? null : layer.id)}
+                        className="flex-shrink-0 rounded px-0.5 text-slate-500 hover:bg-slate-600 hover:text-slate-300"
+                      >
+                        <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" d="M10.325 4.317a1.724 1.724 0 013.35 0c.11.223.29.396.507.493a1.724 1.724 0 012.573 1.066c.043.234.157.443.325.607a1.724 1.724 0 01-.525 2.83c-.2.123-.353.306-.432.525a1.724 1.724 0 01-1.066 2.573c-.234.043-.443.157-.607.325a1.724 1.724 0 01-2.83-.525 1.161 1.161 0 00-.525-.432 1.724 1.724 0 01-2.573-1.066 1.161 1.161 0 00-.325-.607 1.724 1.724 0 01.525-2.83c.2-.123.353-.306.432-.525a1.724 1.724 0 011.066-2.573c.234-.043.443-.157.607-.325z" />
+                          <circle cx="12" cy="12" r="3" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRefRemove(layer.id)}
+                        className="flex-shrink-0 rounded px-0.5 text-slate-500 hover:bg-red-900/50 hover:text-red-400"
+                        title="Remove"
+                      >
+                        <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                    {isExpanded && (
+                      <div className="ml-4 mt-1 space-y-1.5 rounded bg-slate-800/80 p-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[9px] text-slate-500">Colour</span>
+                          <input
+                            type="color"
+                            value={layer.style.color}
+                            onChange={e => onRefStyleChange(layer.id, { ...layer.style, color: e.target.value })}
+                            className="h-5 w-5 cursor-pointer rounded border-0 bg-transparent p-0"
+                          />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[9px] text-slate-500">Opacity</span>
+                          <input
+                            type="range" min="0" max="100" step="5"
+                            value={Math.round(layer.style.opacity * 100)}
+                            onChange={e => onRefStyleChange(layer.id, { ...layer.style, opacity: parseInt(e.target.value) / 100 })}
+                            className="h-1 w-20"
+                          />
+                          <span className="text-[9px] text-slate-400">{Math.round(layer.style.opacity * 100)}%</span>
+                        </div>
+                        {layer.kind === 'surface' && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-slate-500">Edges</span>
+                            <button
+                              type="button"
+                              onClick={() => onRefStyleChange(layer.id, { ...layer.style, wireframe: !layer.style.wireframe })}
+                              className={`rounded px-1.5 py-0.5 text-[9px] ${
+                                layer.style.wireframe ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-slate-400'
+                              }`}
+                            >
+                              {layer.style.wireframe ? 'On' : 'Off'}
+                            </button>
+                          </div>
+                        )}
+                        {layer.kind === 'lines' && (
+                          <>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[9px] text-slate-500">Width</span>
+                              <input
+                                type="range" min="1" max="5" step="0.5"
+                                value={layer.style.lineWidth}
+                                onChange={e => onRefStyleChange(layer.id, { ...layer.style, lineWidth: parseFloat(e.target.value) })}
+                                className="h-1 w-20"
+                              />
+                              <span className="text-[9px] text-slate-400">{layer.style.lineWidth}px</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[9px] text-slate-500">Style</span>
+                              <div className="flex gap-1">
+                                {([
+                                  { label: 'Solid', dash: [] },
+                                  { label: 'Dash', dash: [8, 4] },
+                                  { label: 'Dot', dash: [2, 3] },
+                                  { label: 'D-D', dash: [8, 3, 2, 3] },
+                                ] as { label: string; dash: number[] }[]).map(preset => (
+                                  <button
+                                    key={preset.label}
+                                    type="button"
+                                    onClick={() => onRefStyleChange(layer.id, { ...layer.style, lineDash: preset.dash })}
+                                    className={`rounded px-1 py-0 text-[8px] ${
+                                      JSON.stringify(layer.style.lineDash) === JSON.stringify(preset.dash)
+                                        ? 'bg-indigo-600 text-white'
+                                        : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                                    }`}
+                                  >
+                                    {preset.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>

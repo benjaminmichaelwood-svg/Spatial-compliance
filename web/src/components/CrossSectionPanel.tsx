@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import type { CrossSectionData, SurfaceProfile, SolidSection } from '../utils/crossSection';
-import type { SurfaceRole, UploadedSurface } from '../types';
+import type { SurfaceRole, UploadedSurface, ReferenceLayer, Vec3 } from '../types';
+import { computeSurfaceProfileFromArrays } from '../utils/crossSection';
 
 interface Props {
   data: CrossSectionData;
@@ -16,6 +17,7 @@ interface Props {
   onSelectProfile?: (role: SurfaceRole) => void;
   onSelectSolid?: (domain: string) => void;
   onStepSection?: (offset: number) => void;
+  refLayers?: ReferenceLayer[];
 }
 
 interface ViewBox {
@@ -111,6 +113,7 @@ export default function CrossSectionPanel({
   onSelectProfile,
   onSelectSolid,
   onStepSection,
+  refLayers,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -205,6 +208,7 @@ export default function CrossSectionPanel({
   // Legend visibility toggles (local to section view)
   const [hiddenProfiles, setHiddenProfiles] = useState<Set<SurfaceRole>>(new Set());
   const [hiddenSolids, setHiddenSolids] = useState<Set<string>>(new Set());
+  const [hiddenRefProfiles, setHiddenRefProfiles] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -259,6 +263,23 @@ export default function CrossSectionPanel({
   const visibleSolids = useMemo(() => {
     return data.solids.filter(s => !hiddenSolids.has(s.domain));
   }, [data.solids, hiddenSolids]);
+
+  const refProfiles = useMemo(() => {
+    if (!refLayers || refLayers.length === 0) return [];
+    const result: { id: string; label: string; color: string; points: { dist: number; z: number }[] }[] = [];
+    for (const layer of refLayers) {
+      if (!layer.visible || layer.kind !== 'surface' || !layer.surface) continue;
+      const surf = layer.surface;
+      const points = computeSurfaceProfileFromArrays(
+        surf.positions, surf.indices, surf.vertexCount, surf.triangleCount,
+        sectionLine[0], sectionLine[1],
+      );
+      if (points.length > 0) {
+        result.push({ id: layer.id, label: layer.fileName, color: layer.style.color, points });
+      }
+    }
+    return result;
+  }, [refLayers, sectionLine]);
 
   // Unique domains for legend
   const uniqueDomains = useMemo(() => {
@@ -390,6 +411,23 @@ export default function CrossSectionPanel({
       profileHits.push({ role: p.role, path });
     }
 
+    // Draw reference surface profiles (thin dashed grey)
+    for (const rp of refProfiles) {
+      if (hiddenRefProfiles.has(rp.id) || rp.points.length < 2) continue;
+      const rpPath = new Path2D();
+      rpPath.moveTo(toX(rp.points[0].dist), toY(rp.points[0].z));
+      for (let i = 1; i < rp.points.length; i++) {
+        rpPath.lineTo(toX(rp.points[i].dist), toY(rp.points[i].z));
+      }
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = rp.color;
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.7;
+      ctx.stroke(rpPath);
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    }
+
     ctx.restore();
 
     hitTestRef.current = { profiles: profileHits, solids: solidHits };
@@ -440,7 +478,7 @@ export default function CrossSectionPanel({
       ctx.textAlign = 'center';
       ctx.fillText(scaleBar.label, sbX + scaleBar.widthPx / 2, sbY + 14);
     }
-  }, [data, size, view, plotW, plotH, toX, toY, visibleProfiles, visibleSolids, domainStyles, surfaceStyles, scaleBar, theme, getTraceStyle]);
+  }, [data, size, view, plotW, plotH, toX, toY, visibleProfiles, visibleSolids, domainStyles, surfaceStyles, scaleBar, theme, getTraceStyle, refProfiles, hiddenRefProfiles]);
 
   // Plan overview render
   useEffect(() => {
@@ -1125,6 +1163,47 @@ export default function CrossSectionPanel({
               </div>
             );
           })()}
+
+          {refProfiles.length > 0 && (
+            <>
+              <div className="mb-2 mt-3 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Reference</div>
+              {refProfiles.map(rp => {
+                const isVis = !hiddenRefProfiles.has(rp.id);
+                return (
+                  <label
+                    key={rp.id}
+                    className="mb-1 flex cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 hover:bg-slate-700/50"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isVis}
+                      onChange={() => {
+                        setHiddenRefProfiles(prev => {
+                          const next = new Set(prev);
+                          if (next.has(rp.id)) next.delete(rp.id);
+                          else next.add(rp.id);
+                          return next;
+                        });
+                      }}
+                      className="h-3 w-3 rounded border-slate-600"
+                    />
+                    <svg width="20" height="8" className="flex-shrink-0">
+                      <line
+                        x1="0" y1="4" x2="20" y2="4"
+                        stroke={rp.color}
+                        strokeWidth={1}
+                        strokeDasharray="6,4"
+                        opacity={0.7}
+                      />
+                    </svg>
+                    <span className={`truncate text-[10px] ${isVis ? 'text-slate-300' : 'text-slate-500'}`}>
+                      {rp.label}
+                    </span>
+                  </label>
+                );
+              })}
+            </>
+          )}
 
           {uniqueDomains.length > 0 && (
             <>
