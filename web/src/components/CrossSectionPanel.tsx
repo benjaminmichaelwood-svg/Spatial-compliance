@@ -167,6 +167,29 @@ export default function CrossSectionPanel({
   const [view, setView] = useState<ViewBox>(bounds);
   useEffect(() => setView(bounds), [bounds]);
 
+  // Precompute surface boundary edges for overview (edges belonging to only one triangle)
+  const surfaceBoundaryEdges = useMemo(() => {
+    if (!uploadsForOverview || uploadsForOverview.size === 0) return new Map<SurfaceRole, [number, number][]>();
+    const result = new Map<SurfaceRole, [number, number][]>();
+    for (const [role, upload] of uploadsForOverview) {
+      const edgeCounts = new Map<string, [number, number]>();
+      const edgeKey = (a: number, b: number) => a < b ? `${a},${b}` : `${b},${a}`;
+      for (let t = 0; t < upload.triangleCount; t++) {
+        const i0 = upload.indices[t * 3], i1 = upload.indices[t * 3 + 1], i2 = upload.indices[t * 3 + 2];
+        for (const [a, b] of [[i0, i1], [i1, i2], [i2, i0]] as [number, number][]) {
+          const k = edgeKey(a, b);
+          if (edgeCounts.has(k)) {
+            edgeCounts.delete(k);
+          } else {
+            edgeCounts.set(k, [a, b]);
+          }
+        }
+      }
+      result.set(role, [...edgeCounts.values()]);
+    }
+    return result;
+  }, [uploadsForOverview]);
+
   // Initialize overview center from pit bounds
   useEffect(() => {
     if (pitBounds && !overviewInitialized.current) {
@@ -469,7 +492,7 @@ export default function CrossSectionPanel({
       ctx.stroke();
     }
 
-    // Draw filled surface footprints
+    // Draw surface boundary edges (outline of each triangulation)
     const surfaceColors: Record<string, string> = {
       production_start: '#94a3b8',
       production_end: '#64748b',
@@ -481,18 +504,17 @@ export default function CrossSectionPanel({
       for (const [role, upload] of uploadsForOverview) {
         const pStyle = surfaceStyles.get(role);
         const color = pStyle?.color || surfaceColors[role] || '#64748b';
-        ctx.fillStyle = color;
-        ctx.globalAlpha = 0.15;
-        const step = Math.max(1, Math.floor(upload.triangleCount / 8000));
+        const edges = surfaceBoundaryEdges.get(role);
+        if (!edges || edges.length === 0) continue;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.6;
         ctx.beginPath();
-        for (let t = 0; t < upload.triangleCount; t += step) {
-          const i0 = upload.indices[t * 3], i1 = upload.indices[t * 3 + 1], i2 = upload.indices[t * 3 + 2];
-          ctx.moveTo(mapX(upload.positions[i0 * 3]), mapY(upload.positions[i0 * 3 + 1]));
-          ctx.lineTo(mapX(upload.positions[i1 * 3]), mapY(upload.positions[i1 * 3 + 1]));
-          ctx.lineTo(mapX(upload.positions[i2 * 3]), mapY(upload.positions[i2 * 3 + 1]));
-          ctx.closePath();
+        for (const [a, b] of edges) {
+          ctx.moveTo(mapX(upload.positions[a * 3]), mapY(upload.positions[a * 3 + 1]));
+          ctx.lineTo(mapX(upload.positions[b * 3]), mapY(upload.positions[b * 3 + 1]));
         }
-        ctx.fill();
+        ctx.stroke();
         ctx.globalAlpha = 1;
       }
     }
@@ -583,7 +605,7 @@ export default function CrossSectionPanel({
     ctx.strokeStyle = theme.overviewBorder;
     ctx.lineWidth = 1;
     ctx.strokeRect(0, 0, cw, ch);
-  }, [pitBounds, pitOutlineEdges, uploadsForOverview, sectionLine, data.profiles, surfaceStyles, theme, overviewView, ovLayout]);
+  }, [pitBounds, pitOutlineEdges, uploadsForOverview, surfaceBoundaryEdges, sectionLine, data.profiles, surfaceStyles, theme, overviewView, ovLayout]);
 
   // Interactions — main canvas
   const dragRef = useRef<{ sx: number; sy: number; sv: ViewBox } | null>(null);
@@ -594,47 +616,47 @@ export default function CrossSectionPanel({
     return Math.max(10, Math.round(range / 50));
   }, [pitBounds]);
 
-  // Item 4: Scroll = horizontal zoom, SHIFT+scroll = adjust VE, CTRL+scroll = step section
-  const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
-      e.preventDefault();
+  // Native wheel handler — must be non-passive to prevent browser CTRL+scroll zoom
+  const wheelStateRef = useRef({ view, plotW, plotH, onStepSection, stepSize });
+  wheelStateRef.current = { view, plotW, plotH, onStepSection, stepSize };
 
-      // CTRL+scroll = step section line
-      if (e.ctrlKey && onStepSection) {
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      const { view: v, plotW: pw, plotH: ph, onStepSection: step, stepSize: ss } = wheelStateRef.current;
+
+      if (e.ctrlKey && step) {
         const dir = e.deltaY > 0 ? 1 : -1;
-        onStepSection(dir * stepSize);
+        step(dir * ss);
         return;
       }
 
-      // SHIFT+scroll = adjust vertical exaggeration
       if (e.shiftKey) {
         const factor = e.deltaY > 0 ? 1.08 : 1 / 1.08;
-        setView(v => {
-          const zMid = (v.minZ + v.maxZ) / 2;
-          const halfZ = (v.maxZ - v.minZ) / 2;
-          return {
-            ...v,
-            minZ: zMid - halfZ * factor,
-            maxZ: zMid + halfZ * factor,
-          };
+        setView(prev => {
+          const zMid = (prev.minZ + prev.maxZ) / 2;
+          const halfZ = (prev.maxZ - prev.minZ) / 2;
+          return { ...prev, minZ: zMid - halfZ * factor, maxZ: zMid + halfZ * factor };
         });
         return;
       }
 
-      // Plain scroll = horizontal zoom centered on cursor
-      const rect = canvasRef.current?.getBoundingClientRect();
-      if (!rect || plotW <= 0 || plotH <= 0) return;
+      const rect = el.getBoundingClientRect();
+      if (!rect || pw <= 0 || ph <= 0) return;
       const cx = e.clientX - rect.left;
-      const d = view.minD + ((cx - MARGIN.left) / plotW) * (view.maxD - view.minD);
+      const d = v.minD + ((cx - MARGIN.left) / pw) * (v.maxD - v.minD);
       const f = e.deltaY > 0 ? 1.15 : 1 / 1.15;
-      setView(v => ({
-        ...v,
-        minD: d - (d - v.minD) * f,
-        maxD: d + (v.maxD - d) * f,
+      setView(prev => ({
+        ...prev,
+        minD: d - (d - prev.minD) * f,
+        maxD: d + (prev.maxD - d) * f,
       }));
-    },
-    [view, plotW, plotH, onStepSection, stepSize],
-  );
+    };
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, []);
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -689,16 +711,19 @@ export default function CrossSectionPanel({
     [onSelectProfile, onSelectSolid],
   );
 
-  // Item 3: Overview interactions
-  const handleOverviewWheel = useCallback(
-    (e: React.WheelEvent) => {
+  // Item 3: Overview interactions — native wheel to prevent browser zoom
+  useEffect(() => {
+    const el = overviewRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
       e.preventDefault();
       e.stopPropagation();
       const f = e.deltaY > 0 ? 1 / 1.2 : 1.2;
       setOverviewView(v => ({ ...v, zoom: Math.max(0.5, Math.min(20, v.zoom * f)) }));
-    },
-    [],
-  );
+    };
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, []);
 
   const handleOverviewMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -920,7 +945,6 @@ export default function CrossSectionPanel({
           <canvas
             ref={canvasRef}
             style={{ width: size.w, height: size.h, display: 'block' }}
-            onWheel={handleWheel}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={stopDrag}
@@ -962,7 +986,6 @@ export default function CrossSectionPanel({
               <canvas
                 ref={overviewRef}
                 style={{ width: ovLayout.w, height: ovLayout.h - 20, display: 'block', cursor: 'grab' }}
-                onWheel={handleOverviewWheel}
                 onMouseDown={handleOverviewMouseDown}
                 onMouseMove={handleOverviewMouseMove}
                 onMouseUp={stopOverviewDrag}
