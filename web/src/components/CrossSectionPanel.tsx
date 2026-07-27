@@ -37,6 +37,13 @@ interface OverviewView {
   zoom: number;
 }
 
+interface OverviewLayout {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 const MARGIN = { top: 40, right: 16, bottom: 44, left: 64 };
 
 function niceStep(range: number, target: number): number {
@@ -127,6 +134,11 @@ export default function CrossSectionPanel({
   const [overviewView, setOverviewView] = useState<OverviewView>({ cx: 0, cy: 0, zoom: 1 });
   const overviewDragRef = useRef<{ sx: number; sy: number; sv: OverviewView } | null>(null);
   const overviewInitialized = useRef(false);
+
+  // Item 4: Dockable/moveable/resizable overview
+  const [ovLayout, setOvLayout] = useState<OverviewLayout>({ x: -1, y: -1, w: 220, h: 220 });
+  const ovMoveRef = useRef<{ sx: number; sy: number; sl: OverviewLayout } | null>(null);
+  const ovResizeRef = useRef<{ sx: number; sy: number; sl: OverviewLayout; edge: string } | null>(null);
 
   const bounds = useMemo(() => {
     let minD = Infinity, maxD = -Infinity, minZ = Infinity, maxZ = -Infinity;
@@ -359,6 +371,14 @@ export default function CrossSectionPanel({
 
     hitTestRef.current = { profiles: profileHits, solids: solidHits };
 
+    // A—A' labels at edges of cross-section
+    ctx.font = 'bold 12px system-ui,sans-serif';
+    ctx.fillStyle = '#facc15';
+    ctx.textAlign = 'left';
+    ctx.fillText('A', MARGIN.left + 4, MARGIN.top - 6);
+    ctx.textAlign = 'right';
+    ctx.fillText("A'", MARGIN.left + plotW - 4, MARGIN.top - 6);
+
     // Axis labels
     ctx.fillStyle = theme.axisText;
     ctx.font = '11px system-ui,sans-serif';
@@ -406,8 +426,8 @@ export default function CrossSectionPanel({
     const ctx = c.getContext('2d');
     if (!ctx) return;
     const dpr = devicePixelRatio || 1;
-    const cw = 200;
-    const ch = 200;
+    const cw = ovLayout.w;
+    const ch = ovLayout.h - 20;
     c.width = cw * dpr;
     c.height = ch * dpr;
     ctx.scale(dpr, dpr);
@@ -527,13 +547,18 @@ export default function CrossSectionPanel({
     ctx.lineTo(mapX(p2[0]), mapY(p2[1]));
     ctx.stroke();
 
-    // Endpoint dots
+    // Endpoint dots + A/A' labels
     ctx.fillStyle = '#facc15';
     for (const p of [p1, p2]) {
       ctx.beginPath();
       ctx.arc(mapX(p[0]), mapY(p[1]), 3, 0, Math.PI * 2);
       ctx.fill();
     }
+    ctx.font = 'bold 11px system-ui,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#facc15';
+    ctx.fillText('A', mapX(p1[0]), mapY(p1[1]) - 7);
+    ctx.fillText("A'", mapX(p2[0]), mapY(p2[1]) - 7);
 
     // North arrow
     const naX = cw - 16;
@@ -558,7 +583,7 @@ export default function CrossSectionPanel({
     ctx.strokeStyle = theme.overviewBorder;
     ctx.lineWidth = 1;
     ctx.strokeRect(0, 0, cw, ch);
-  }, [pitBounds, pitOutlineEdges, uploadsForOverview, sectionLine, data.profiles, surfaceStyles, theme, overviewView]);
+  }, [pitBounds, pitOutlineEdges, uploadsForOverview, sectionLine, data.profiles, surfaceStyles, theme, overviewView, ovLayout]);
 
   // Interactions — main canvas
   const dragRef = useRef<{ sx: number; sy: number; sv: ViewBox } | null>(null);
@@ -691,13 +716,16 @@ export default function CrossSectionPanel({
       const { minX, maxX, minY, maxY } = pitBounds;
       const rangeX = maxX - minX || 1;
       const rangeY = maxY - minY || 1;
-      const baseScale = Math.min(160 / rangeX, 160 / rangeY);
+      const pad = 20;
+      const cw = ovLayout.w;
+      const ch = ovLayout.h - 20;
+      const baseScale = Math.min((cw - pad * 2) / rangeX, (ch - pad * 2) / rangeY);
       const scale = baseScale * sv.zoom;
       const dx = (e.clientX - sx) / scale;
       const dy = (e.clientY - sy) / scale;
       setOverviewView({ ...sv, cx: sv.cx - dx, cy: sv.cy + dy });
     },
-    [pitBounds],
+    [pitBounds, ovLayout],
   );
 
   const stopOverviewDrag = useCallback(() => {
@@ -723,6 +751,64 @@ export default function CrossSectionPanel({
     }
     setVeEditMode(false);
   }, [veEditValue, view, plotW, plotH]);
+
+  // Item 4: Overview move/resize handlers
+  const handleOvTitleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      ovMoveRef.current = { sx: e.clientX, sy: e.clientY, sl: { ...ovLayout } };
+      const onMove = (ev: MouseEvent) => {
+        if (!ovMoveRef.current) return;
+        const { sx, sy, sl } = ovMoveRef.current;
+        setOvLayout({ ...sl, x: sl.x + (ev.clientX - sx), y: sl.y + (ev.clientY - sy) });
+      };
+      const onUp = () => {
+        ovMoveRef.current = null;
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    },
+    [ovLayout],
+  );
+
+  const handleOvResizeMouseDown = useCallback(
+    (e: React.MouseEvent, edge: string) => {
+      e.stopPropagation();
+      e.preventDefault();
+      ovResizeRef.current = { sx: e.clientX, sy: e.clientY, sl: { ...ovLayout }, edge };
+      const onMove = (ev: MouseEvent) => {
+        if (!ovResizeRef.current) return;
+        const { sx, sy, sl, edge: ed } = ovResizeRef.current;
+        const dx = ev.clientX - sx;
+        const dy = ev.clientY - sy;
+        const next = { ...sl };
+        if (ed.includes('e')) next.w = Math.max(120, sl.w + dx);
+        if (ed.includes('s')) next.h = Math.max(120, sl.h + dy);
+        if (ed.includes('w')) { next.x = sl.x + dx; next.w = Math.max(120, sl.w - dx); }
+        if (ed.includes('n')) { next.y = sl.y + dy; next.h = Math.max(120, sl.h - dy); }
+        setOvLayout(next);
+      };
+      const onUp = () => {
+        ovResizeRef.current = null;
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    },
+    [ovLayout],
+  );
+
+  // Compute overview position: default to bottom-right if x < 0
+  const ovPos = useMemo(() => {
+    if (ovLayout.x < 0) {
+      return { x: size.w - ovLayout.w - 12, y: size.h - ovLayout.h - 12 };
+    }
+    return { x: ovLayout.x, y: ovLayout.y };
+  }, [ovLayout, size]);
 
   // Item 2: Trace style popover handlers
   const updateTrace = useCallback((role: SurfaceRole, update: Partial<TraceStyle>) => {
@@ -842,29 +928,53 @@ export default function CrossSectionPanel({
             onClick={handleCanvasClick}
             className="cursor-grab active:cursor-grabbing"
           />
-          {/* Plan overview sub-window */}
+          {/* Plan overview sub-window — dockable, moveable, resizable */}
           {pitBounds && (
-            <div className="absolute bottom-3 right-3 rounded border border-slate-600 shadow-lg">
+            <div
+              className="absolute rounded border border-slate-600 shadow-lg"
+              style={{
+                left: ovPos.x,
+                top: ovPos.y,
+                width: ovLayout.w,
+                height: ovLayout.h,
+                zIndex: 50,
+              }}
+            >
+              {/* Title bar — drag to move */}
+              <div
+                className="flex h-5 cursor-move items-center justify-between rounded-t border-b border-slate-600 bg-slate-700/90 px-1.5"
+                onMouseDown={handleOvTitleMouseDown}
+              >
+                <span className="select-none text-[9px] font-semibold text-slate-400">Plan View</span>
+                <div className="flex items-center gap-1">
+                  {overviewView.zoom !== 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setOverviewView(v => ({ ...v, zoom: 1, cx: pitBounds ? (pitBounds.minX + pitBounds.maxX) / 2 : v.cx, cy: pitBounds ? (pitBounds.minY + pitBounds.maxY) / 2 : v.cy }))}
+                      className="rounded px-1 py-0 text-[8px] text-slate-400 hover:text-white"
+                      title="Reset overview zoom"
+                    >
+                      {overviewView.zoom.toFixed(1)}x
+                    </button>
+                  )}
+                </div>
+              </div>
               <canvas
                 ref={overviewRef}
-                style={{ width: 200, height: 200, display: 'block', cursor: 'grab' }}
+                style={{ width: ovLayout.w, height: ovLayout.h - 20, display: 'block', cursor: 'grab' }}
                 onWheel={handleOverviewWheel}
                 onMouseDown={handleOverviewMouseDown}
                 onMouseMove={handleOverviewMouseMove}
                 onMouseUp={stopOverviewDrag}
                 onMouseLeave={stopOverviewDrag}
               />
-              <div className="absolute bottom-1 left-1 text-[8px] text-slate-500">Plan View</div>
-              {overviewView.zoom !== 1 && (
-                <button
-                  type="button"
-                  onClick={() => setOverviewView(v => ({ ...v, zoom: 1, cx: pitBounds ? (pitBounds.minX + pitBounds.maxX) / 2 : v.cx, cy: pitBounds ? (pitBounds.minY + pitBounds.maxY) / 2 : v.cy }))}
-                  className="absolute bottom-1 right-1 rounded bg-slate-700/80 px-1 py-0 text-[8px] text-slate-400 hover:text-white"
-                  title="Reset overview zoom"
-                >
-                  {overviewView.zoom.toFixed(1)}x
-                </button>
-              )}
+              {/* Resize handles */}
+              <div className="absolute right-0 top-5 bottom-0 w-1.5 cursor-e-resize" onMouseDown={e => handleOvResizeMouseDown(e, 'e')} />
+              <div className="absolute bottom-0 left-0 right-0 h-1.5 cursor-s-resize" onMouseDown={e => handleOvResizeMouseDown(e, 's')} />
+              <div className="absolute left-0 top-5 bottom-0 w-1.5 cursor-w-resize" onMouseDown={e => handleOvResizeMouseDown(e, 'w')} />
+              <div className="absolute top-5 left-0 right-0 h-1.5 cursor-n-resize" onMouseDown={e => handleOvResizeMouseDown(e, 'n')} />
+              <div className="absolute bottom-0 right-0 h-3 w-3 cursor-se-resize" onMouseDown={e => handleOvResizeMouseDown(e, 'se')} />
+              <div className="absolute bottom-0 left-0 h-3 w-3 cursor-sw-resize" onMouseDown={e => handleOvResizeMouseDown(e, 'sw')} />
             </div>
           )}
         </div>
