@@ -212,14 +212,20 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
     if (!heatmapGeo || !heatmapVertexThickness || !heatmapMode) return;
     const colorAttr = heatmapGeo.attributes.color as THREE.BufferAttribute;
     const arr = colorAttr.array as Float32Array;
-    const { scaleMin, scaleMax } = heatmapMode;
+    const { scaleMin, scaleMax, deadband } = heatmapMode;
     const range = scaleMax - scaleMin;
+    // Base surface color for deadband vertices (material is white when painted,
+    // so vertex color = surface color reproduces the unpainted look)
+    const baseCol = new THREE.Color(style.color);
 
     for (let i = 0; i < heatmapVertexThickness.length; i++) {
       const dz = heatmapVertexThickness[i];
       let r: number, g: number, b: number;
       if (isNaN(dz)) {
         r = 0.3; g = 0.3; b = 0.3;
+      } else if (deadband > 0 && Math.abs(dz) <= deadband) {
+        // Within neutral zone — show base surface colour
+        r = baseCol.r; g = baseCol.g; b = baseCol.b;
       } else {
         const t = range > 0 ? (dz - scaleMin) / range : 0.5;
         [r, g, b] = sampleHeatmapRamp(t);
@@ -229,7 +235,7 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
       arr[i * 3 + 2] = b;
     }
     colorAttr.needsUpdate = true;
-  }, [heatmapGeo, heatmapVertexThickness, heatmapMode]);
+  }, [heatmapGeo, heatmapVertexThickness, heatmapMode, style.color]);
 
   const isPainted = isHeatmapActive;
   const activeGeo = isHeatmapActive ? (heatmapGeo ?? geometry) : geometry;
@@ -1624,6 +1630,8 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
           scaleMin={heatmapMode.scaleMin}
           scaleMax={heatmapMode.scaleMax}
           isDark={isDark}
+          deadband={heatmapMode.deadband}
+          surfaceColor={surfaceStyles.get(heatmapMode.paintRole)?.color}
         />
       )}
 

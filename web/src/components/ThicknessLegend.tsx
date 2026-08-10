@@ -41,11 +41,18 @@ interface Props {
   scaleMin: number;
   scaleMax: number;
   isDark: boolean;
+  deadband?: number;
+  surfaceColor?: string;
 }
 
-export default function ThicknessLegend({ scaleMin, scaleMax, isDark }: Props) {
+export default function ThicknessLegend({ scaleMin, scaleMax, isDark, deadband = 0, surfaceColor }: Props) {
   const range = scaleMax - scaleMin;
   const zeroT = range > 0 ? (0 - scaleMin) / range : 0.5;
+
+  // Deadband zone in normalised space
+  const dbLo = range > 0 ? (-deadband - scaleMin) / range : 0.5;
+  const dbHi = range > 0 ? (deadband - scaleMin) / range : 0.5;
+  const showDeadband = deadband > 0 && dbHi > 0 && dbLo < 1;
 
   const tickValues: number[] = [];
   const numTicks = 7;
@@ -64,27 +71,41 @@ export default function ThicknessLegend({ scaleMin, scaleMax, isDark }: Props) {
       <div className="flex flex-col items-center gap-0.5">
         <div className="text-[9px] font-semibold text-white/70">Underdig</div>
         <div
-          className="w-5 rounded-sm relative"
+          className="w-5 rounded-sm relative overflow-hidden"
           style={{
             background: buildGradientCSS(),
             height: 200,
           }}
         >
+          {/* Deadband neutral overlay */}
+          {showDeadband && (
+            <div
+              className="absolute left-0 right-0"
+              style={{
+                bottom: `${Math.max(0, dbLo) * 100}%`,
+                top: `${(1 - Math.min(1, dbHi)) * 100}%`,
+                backgroundColor: surfaceColor || (isDark ? '#475569' : '#94a3b8'),
+              }}
+            />
+          )}
           {zeroT > 0.05 && zeroT < 0.95 && (
             <div
               className="absolute left-0 right-0 h-px bg-white/80"
-              style={{ bottom: `${zeroT * 100}%` }}
+              style={{ bottom: `${zeroT * 100}%`, zIndex: 1 }}
             />
           )}
         </div>
         <div className="text-[9px] font-semibold text-white/70">Overdig</div>
       </div>
       <div className="flex flex-col justify-between" style={{ height: 200, paddingTop: 14, paddingBottom: 14 }}>
-        {[...tickValues].reverse().map((v, i) => (
-          <div key={i} className="text-[10px] font-mono text-white/80 leading-none">
-            {v > 0 ? '+' : ''}{v.toFixed(1)}m
-          </div>
-        ))}
+        {[...tickValues].reverse().map((v, i) => {
+          const inDeadband = deadband > 0 && Math.abs(v) <= deadband && Math.abs(v) > 0.01;
+          return (
+            <div key={i} className={`text-[10px] font-mono leading-none ${inDeadband ? 'text-white/30' : 'text-white/80'}`}>
+              {v > 0 ? '+' : ''}{v.toFixed(1)}m
+            </div>
+          );
+        })}
       </div>
     </div>
   );

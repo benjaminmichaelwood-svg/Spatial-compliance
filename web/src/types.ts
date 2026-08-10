@@ -103,6 +103,7 @@ export interface HeatmapMode {
   refRole: SurfaceRole;
   scaleMin: number;
   scaleMax: number;
+  deadband: number;
 }
 
 export type RefLayerKind = 'surface' | 'lines';

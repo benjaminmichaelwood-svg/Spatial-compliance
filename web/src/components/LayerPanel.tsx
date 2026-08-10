@@ -298,6 +298,7 @@ export default function LayerPanel({
                       refRole: defaultRef,
                       scaleMin: -10,
                       scaleMax: 10,
+                      deadband: 1,
                     });
                   } else {
                     onHeatmapModeChange(null);
@@ -364,6 +365,24 @@ export default function LayerPanel({
                     className="w-14 rounded border border-slate-600 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-200 outline-none focus:border-indigo-500"
                   />
                   <span className="text-slate-500">m</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-[10px]">
+                  <span className="text-slate-500 w-14">Hide ±</span>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0"
+                    defaultValue={heatmapMode!.deadband}
+                    key={`db-${heatmapMode!.deadband}`}
+                    onBlur={(e) => {
+                      const v = parseFloat(e.target.value);
+                      if (!isNaN(v) && v >= 0) onHeatmapModeChange({ ...heatmapMode!, deadband: v });
+                    }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                    className="w-14 rounded border border-slate-600 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-200 outline-none focus:border-indigo-500"
+                  />
+                  <span className="text-slate-500">m</span>
+                  <span className="text-slate-600 text-[9px] ml-1">(neutral zone)</span>
                 </div>
                 <div className="flex gap-1 flex-wrap">
                   {[
