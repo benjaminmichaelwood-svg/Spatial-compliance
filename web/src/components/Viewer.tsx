@@ -1272,7 +1272,7 @@ function RefPolylinesMesh({ layer }: { layer: ReferenceLayer }) {
         pts.push([pl.points[i * 3], pl.points[i * 3 + 1], pl.points[i * 3 + 2]]);
       }
       if (pl.closed && pts.length > 0) pts.push(pts[0]);
-      return { points: pts, color: pl.color, name: pl.name };
+      return { points: pts, color: pl.colorOverride || pl.color, name: pl.name };
     });
   }, [layer.polylines]);
 
@@ -1282,7 +1282,7 @@ function RefPolylinesMesh({ layer }: { layer: ReferenceLayer }) {
         <Line
           key={i}
           points={ld.points}
-          color={layer.style.color !== '#cccccc' ? layer.style.color : ld.color}
+          color={layer.style.color !== '#cccccc' ? layer.style.color : (ld.color || '#cccccc')}
           lineWidth={layer.style.lineWidth}
           dashed={layer.style.lineDash.length > 0}
           dashSize={layer.style.lineDash[0] ?? 1}

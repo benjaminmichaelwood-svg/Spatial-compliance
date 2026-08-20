@@ -197,6 +197,76 @@ export function computeSurfaceProfileFromArrays(
   return computeSurfaceProfile(verts, idxs, p1, p2);
 }
 
+/**
+ * Find where 3D polylines cross the vertical section plane.
+ * Returns intersection points as {dist, z} in section-line coordinates.
+ */
+export function computePolylineSectionIntersections(
+  polylines: { points: Float32Array; pointCount: number; closed: boolean }[],
+  p1: [number, number],
+  p2: [number, number],
+): { dist: number; z: number }[] {
+  const dx = p2[0] - p1[0];
+  const dy = p2[1] - p1[1];
+  const lineLen = Math.sqrt(dx * dx + dy * dy);
+  if (lineLen < 1e-9) return [];
+
+  // Section plane normal in plan view (perpendicular to section line)
+  const nx = -dy / lineLen;
+  const ny = dx / lineLen;
+  // Section line direction (for chainage)
+  const tx = dx / lineLen;
+  const ty = dy / lineLen;
+
+  const hits: { dist: number; z: number }[] = [];
+  const tolerance = lineLen * 0.001; // allow small tolerance for near-misses
+
+  for (const pl of polylines) {
+    const n = pl.pointCount;
+    if (n < 2) continue;
+    const segCount = pl.closed ? n : n - 1;
+
+    for (let i = 0; i < segCount; i++) {
+      const j = (i + 1) % n;
+      const ax = pl.points[i * 3] - p1[0];
+      const ay = pl.points[i * 3 + 1] - p1[1];
+      const az = pl.points[i * 3 + 2];
+      const bx = pl.points[j * 3] - p1[0];
+      const by = pl.points[j * 3 + 1] - p1[1];
+      const bz = pl.points[j * 3 + 2];
+
+      // Signed distance of each endpoint from the section plane
+      const da = ax * nx + ay * ny;
+      const db = bx * nx + by * ny;
+
+      // Check if segment crosses the plane (or is very close)
+      if ((da > tolerance && db > tolerance) || (da < -tolerance && db < -tolerance)) continue;
+
+      const denom = da - db;
+      let t: number;
+      if (Math.abs(denom) < 1e-12) {
+        // Segment is parallel to/on the plane — take midpoint
+        t = 0.5;
+      } else {
+        t = da / denom;
+      }
+      t = Math.max(0, Math.min(1, t));
+
+      const ix = ax + t * (bx - ax);
+      const iy = ay + t * (by - ay);
+      const iz = az + t * (bz - az);
+
+      // Chainage along section line
+      const dist = ix * tx + iy * ty;
+      if (dist >= -tolerance && dist <= lineLen + tolerance) {
+        hits.push({ dist: Math.max(0, Math.min(lineLen, dist)), z: iz });
+      }
+    }
+  }
+
+  return hits;
+}
+
 export function computeCrossSection(
   uploads: Map<SurfaceRole, UploadedSurface>,
   domains: DomainSolid[],

@@ -122,6 +122,7 @@ export interface RefPolylineData {
   color: string;
   layer: string;
   name: string;
+  colorOverride?: string; // per-polyline user override
 }
 
 export interface RefLayerStyle {

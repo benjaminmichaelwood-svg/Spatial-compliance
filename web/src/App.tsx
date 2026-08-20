@@ -598,7 +598,7 @@ export default function App() {
               style: defaultStyle,
               polylines: parsed.polylines.map(p => ({
                 points: p.points, pointCount: p.pointCount, closed: p.closed,
-                color: p.color, layer: p.group || p.feature, name: p.name || p.feature,
+                color: p.color, layer: p.layer, name: p.name || p.layer,
               })),
             }]);
           }
@@ -619,6 +619,14 @@ export default function App() {
 
   const handleRefRemove = useCallback((id: string) => {
     setRefLayers(prev => prev.filter(l => l.id !== id));
+  }, []);
+
+  const handleRefPolylineColor = useCallback((layerId: string, polyIdx: number, color: string | undefined) => {
+    setRefLayers(prev => prev.map(l => {
+      if (l.id !== layerId || !l.polylines) return l;
+      const updated = l.polylines.map((p, i) => i === polyIdx ? { ...p, colorOverride: color } : p);
+      return { ...l, polylines: updated };
+    }));
   }, []);
 
   const crossSectionData = useMemo(() => {
@@ -957,6 +965,7 @@ export default function App() {
               onRefToggle={handleRefToggle}
               onRefStyleChange={handleRefStyleChange}
               onRefRemove={handleRefRemove}
+              onRefPolylineColor={handleRefPolylineColor}
             />
           )}
         </aside>

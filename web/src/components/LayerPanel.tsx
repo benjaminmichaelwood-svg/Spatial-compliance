@@ -27,6 +27,7 @@ interface Props {
   onRefToggle: (id: string) => void;
   onRefStyleChange: (id: string, style: RefLayerStyle) => void;
   onRefRemove: (id: string) => void;
+  onRefPolylineColor: (layerId: string, polyIdx: number, color: string | undefined) => void;
 }
 
 function formatVolume(v: number): string {
@@ -100,13 +101,14 @@ export default function LayerPanel({
   result, visible, onToggle, uploads, surfaceVisible, onToggleSurface,
   domainStyles, surfaceStyles, onDomainStyleChange, onSurfaceStyleChange,
   heatmapMode, onHeatmapModeChange,
-  refLayers, onRefToggle, onRefStyleChange, onRefRemove,
+  refLayers, onRefToggle, onRefStyleChange, onRefRemove, onRefPolylineColor,
 }: Props) {
   const [expandedDomain, setExpandedDomain] = useState<string | null>(null);
   const [expandedSurface, setExpandedSurface] = useState<SurfaceRole | null>(null);
   const [inputSurfacesCollapsed, setInputSurfacesCollapsed] = useState(true);
   const [refCollapsed, setRefCollapsed] = useState(false);
   const [expandedRef, setExpandedRef] = useState<string | null>(null);
+  const [showPolylines, setShowPolylines] = useState<string | null>(null);
 
   const grouped = new Map<string, { color: string; label: string; totalVolume: number; count: number }>();
   for (const d of result.domains) {
@@ -583,6 +585,68 @@ export default function LayerPanel({
                                 ))}
                               </div>
                             </div>
+                            {layer.polylines && layer.polylines.length > 0 && (
+                              <div className="mt-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setShowPolylines(showPolylines === layer.id ? null : layer.id)}
+                                  className="flex items-center gap-1 text-[9px] text-slate-400 hover:text-slate-300"
+                                >
+                                  <svg
+                                    className={`h-2.5 w-2.5 transition-transform ${showPolylines === layer.id ? 'rotate-90' : ''}`}
+                                    fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                                  >
+                                    <path strokeLinecap="round" d="M9 5l7 7-7 7" />
+                                  </svg>
+                                  {layer.polylines.length} polylines
+                                </button>
+                                {showPolylines === layer.id && (() => {
+                                  // Group by layer name for tree display
+                                  const byLayer = new Map<string, { idx: number; pl: typeof layer.polylines extends (infer T)[] | undefined ? T : never }[]>();
+                                  layer.polylines!.forEach((pl, idx) => {
+                                    const lname = pl.layer || 'Default';
+                                    if (!byLayer.has(lname)) byLayer.set(lname, []);
+                                    byLayer.get(lname)!.push({ idx, pl });
+                                  });
+                                  return (
+                                    <div className="mt-1 max-h-40 overflow-y-auto space-y-0.5">
+                                      {[...byLayer.entries()].map(([lname, items]) => (
+                                        <div key={lname}>
+                                          {byLayer.size > 1 && (
+                                            <div className="text-[8px] text-slate-500 font-semibold uppercase tracking-wider px-1 pt-1">
+                                              {lname}
+                                            </div>
+                                          )}
+                                          {items.map(({ idx, pl }) => (
+                                            <div key={idx} className="flex items-center gap-1.5 px-1 py-0.5">
+                                              <input
+                                                type="color"
+                                                value={pl.colorOverride || pl.color}
+                                                onChange={e => onRefPolylineColor(layer.id, idx, e.target.value)}
+                                                className="h-3.5 w-3.5 cursor-pointer rounded border-0 bg-transparent p-0 flex-shrink-0"
+                                              />
+                                              <span className="truncate text-[9px] text-slate-400 flex-1">
+                                                {pl.name || `Line ${idx + 1}`}
+                                              </span>
+                                              {pl.colorOverride && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => onRefPolylineColor(layer.id, idx, undefined)}
+                                                  className="text-[8px] text-slate-600 hover:text-slate-400"
+                                                  title="Reset to file colour"
+                                                >
+                                                  ↺
+                                                </button>
+                                              )}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                            )}
                           </>
                         )}
                       </div>

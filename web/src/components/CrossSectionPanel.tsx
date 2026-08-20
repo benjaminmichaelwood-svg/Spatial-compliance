@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import type { CrossSectionData, SurfaceProfile, SolidSection } from '../utils/crossSection';
 import type { SurfaceRole, UploadedSurface, ReferenceLayer, Vec3 } from '../types';
-import { computeSurfaceProfileFromArrays } from '../utils/crossSection';
+import { computeSurfaceProfileFromArrays, computePolylineSectionIntersections } from '../utils/crossSection';
 
 interface Props {
   data: CrossSectionData;
@@ -281,6 +281,20 @@ export default function CrossSectionPanel({
     return result;
   }, [refLayers, sectionLine]);
 
+  // Reference linework intersection points with section plane
+  const refLineworkHits = useMemo(() => {
+    if (!refLayers || refLayers.length === 0) return [];
+    const result: { id: string; label: string; color: string; hits: { dist: number; z: number }[] }[] = [];
+    for (const layer of refLayers) {
+      if (!layer.visible || layer.kind !== 'lines' || !layer.polylines) continue;
+      const hits = computePolylineSectionIntersections(layer.polylines, sectionLine[0], sectionLine[1]);
+      if (hits.length > 0) {
+        result.push({ id: layer.id, label: layer.fileName, color: layer.style.color, hits });
+      }
+    }
+    return result;
+  }, [refLayers, sectionLine]);
+
   // Unique domains for legend
   const uniqueDomains = useMemo(() => {
     const seen = new Map<string, SolidSection>();
@@ -428,6 +442,29 @@ export default function CrossSectionPanel({
       ctx.globalAlpha = 1;
     }
 
+    // Draw reference linework intersection markers (diamond shapes)
+    for (const rl of refLineworkHits) {
+      if (hiddenRefProfiles.has(rl.id)) continue;
+      ctx.fillStyle = rl.color;
+      ctx.strokeStyle = rl.color;
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = 0.85;
+      for (const hit of rl.hits) {
+        const hx = toX(hit.dist);
+        const hy = toY(hit.z);
+        const r = 4;
+        ctx.beginPath();
+        ctx.moveTo(hx, hy - r);
+        ctx.lineTo(hx + r, hy);
+        ctx.lineTo(hx, hy + r);
+        ctx.lineTo(hx - r, hy);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
     ctx.restore();
 
     hitTestRef.current = { profiles: profileHits, solids: solidHits };
@@ -478,7 +515,7 @@ export default function CrossSectionPanel({
       ctx.textAlign = 'center';
       ctx.fillText(scaleBar.label, sbX + scaleBar.widthPx / 2, sbY + 14);
     }
-  }, [data, size, view, plotW, plotH, toX, toY, visibleProfiles, visibleSolids, domainStyles, surfaceStyles, scaleBar, theme, getTraceStyle, refProfiles, hiddenRefProfiles]);
+  }, [data, size, view, plotW, plotH, toX, toY, visibleProfiles, visibleSolids, domainStyles, surfaceStyles, scaleBar, theme, getTraceStyle, refProfiles, hiddenRefProfiles, refLineworkHits]);
 
   // Plan overview render
   useEffect(() => {
@@ -1164,7 +1201,7 @@ export default function CrossSectionPanel({
             );
           })()}
 
-          {refProfiles.length > 0 && (
+          {(refProfiles.length > 0 || refLineworkHits.length > 0) && (
             <>
               <div className="mb-2 mt-3 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Reference</div>
               {refProfiles.map(rp => {
@@ -1198,6 +1235,41 @@ export default function CrossSectionPanel({
                     </svg>
                     <span className={`truncate text-[10px] ${isVis ? 'text-slate-300' : 'text-slate-500'}`}>
                       {rp.label}
+                    </span>
+                  </label>
+                );
+              })}
+              {refLineworkHits.map(rl => {
+                const isVis = !hiddenRefProfiles.has(rl.id);
+                return (
+                  <label
+                    key={`lw-${rl.id}`}
+                    className="mb-1 flex cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 hover:bg-slate-700/50"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isVis}
+                      onChange={() => {
+                        setHiddenRefProfiles(prev => {
+                          const next = new Set(prev);
+                          if (next.has(rl.id)) next.delete(rl.id);
+                          else next.add(rl.id);
+                          return next;
+                        });
+                      }}
+                      className="h-3 w-3 rounded border-slate-600"
+                    />
+                    <svg width="20" height="12" className="flex-shrink-0">
+                      <polygon
+                        points="10,1 15,6 10,11 5,6"
+                        fill={rl.color}
+                        stroke={rl.color}
+                        strokeWidth={1}
+                        opacity={0.85}
+                      />
+                    </svg>
+                    <span className={`truncate text-[10px] ${isVis ? 'text-slate-300' : 'text-slate-500'}`}>
+                      {rl.label} ({rl.hits.length} pts)
                     </span>
                   </label>
                 );
