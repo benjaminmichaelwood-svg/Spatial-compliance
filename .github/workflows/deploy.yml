@@ -48,9 +48,13 @@ jobs:
         working-directory: web
         run: npm ci
 
-      - name: Build frontend
+      - name: Run frontend tests
         working-directory: web
-        run: npx vite build
+        run: npm test
+
+      - name: Typecheck + build frontend
+        working-directory: web
+        run: npm run build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
