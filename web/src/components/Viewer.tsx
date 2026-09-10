@@ -273,7 +273,10 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
   useEffect(() => {
     return () => {
       for (const g of lodGeometries) {
-        (g as any).boundsTree?.dispose?.();
+        // three-mesh-bvh's BVH is freed by calling the prototype-patched
+        // disposeBoundsTree() on the geometry (it just nulls the
+        // reference) — MeshBVH itself has no .dispose() method.
+        (g as any).disposeBoundsTree?.();
         g.dispose();
       }
     };
@@ -292,6 +295,19 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
     (geo as any).boundsTree = new MeshBVH(geo);
     return geo;
   }, [geometry, isHeatmapActive, heatmapVertexThickness]);
+
+  // heatmapGeo is a full clone of the base geometry (plus its own BVH) —
+  // recreated whenever the heatmap is toggled or its data changes, and
+  // previously never freed. On a real working session (load surfaces, run,
+  // toggle the heatmap repeatedly) this leaked a full duplicate of
+  // whatever surface was painted every time.
+  useEffect(() => {
+    return () => {
+      if (!heatmapGeo) return;
+      (heatmapGeo as any).disposeBoundsTree?.();
+      heatmapGeo.dispose();
+    };
+  }, [heatmapGeo]);
 
   useEffect(() => {
     if (!heatmapGeo || !heatmapVertexThickness || !heatmapMode) return;
@@ -717,7 +733,7 @@ function BatchedDomainGroup({
   useEffect(() => {
     return () => {
       for (const r of lodResults) {
-        (r.geometry as any).boundsTree?.dispose?.();
+        (r.geometry as any).disposeBoundsTree?.();
         r.geometry.dispose();
       }
     };
@@ -1597,6 +1613,10 @@ function RefSurfaceMesh({ layer, isDark }: { layer: ReferenceLayer; isDark: bool
     geo.computeBoundingSphere();
     return geo;
   }, [surf]);
+
+  useEffect(() => {
+    return () => geometry.dispose();
+  }, [geometry]);
 
   return (
     <group visible={layer.visible}>
