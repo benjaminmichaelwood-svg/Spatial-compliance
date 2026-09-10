@@ -149,6 +149,17 @@ function getSurfaceJson(role: string): string {
     if (surfaces && surfaces.length > 0) {
       const json = JSON.stringify(surfaces[0]);
       storedSurfaceJsons.set(role, json);
+      // The raw binary is redundant from this point on: this function
+      // checks storedSurfaceJsons FIRST on every call, so nothing will
+      // ever read storedSurfaceBinaries for this role again. Before this
+      // fix, both copies (raw bytes AND the JSON string derived from
+      // them — typically several times larger than the packed binary,
+      // since JSON encodes each float as decimal text and each vertex as
+      // a verbose {x,y,z} object) were kept in memory simultaneously and
+      // indefinitely after the first "Run Conformance". Freeing the now-
+      // unused binary here is a pure memory win with no behavior change —
+      // getSurfaceJson's return value for this role is identical either way.
+      storedSurfaceBinaries.delete(role);
       return json;
     }
   }
