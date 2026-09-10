@@ -26,5 +26,5 @@ approx = "0.5"
 wasm-opt = false
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = true
