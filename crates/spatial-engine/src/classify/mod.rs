@@ -7,6 +7,15 @@ use crate::solid::{compute_signed_volume, compute_surface_area};
 use crate::types::{BlockSummary, BoundaryRegion, SolidMesh, TriSurface, Vec3};
 use std::collections::HashMap;
 
+mod dig;
+mod domain;
+mod dump;
+
+pub use domain::Domain;
+
+use dig::{classify_cell_dig, per_vertex_bounds_dig};
+use dump::{classify_cell_dump, per_vertex_bounds_dump};
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -16,78 +25,6 @@ use std::collections::HashMap;
 pub enum Mode {
     Dig,
     Dump,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Domain {
-    PlannedAndMined,
-    PlannedNotMined,
-    MinedNotPlanned,
-    MinedBeforeStart,
-    PrescheduleDelay,
-    AheadOfPlan,
-
-    PlannedAndDumped,
-    PlannedNotDumped,
-    DumpedNotPlanned,
-    DumpedBeforeStart,
-    DumpPrescheduleDelay,
-    DumpedAheadOfPlan,
-}
-
-impl Domain {
-    pub fn index(self) -> u8 {
-        match self {
-            Domain::PlannedAndMined => 1,
-            Domain::PlannedNotMined => 2,
-            Domain::MinedNotPlanned => 3,
-            Domain::MinedBeforeStart => 4,
-            Domain::PrescheduleDelay => 5,
-            Domain::AheadOfPlan => 6,
-            Domain::PlannedAndDumped => 7,
-            Domain::PlannedNotDumped => 8,
-            Domain::DumpedNotPlanned => 9,
-            Domain::DumpedBeforeStart => 10,
-            Domain::DumpPrescheduleDelay => 11,
-            Domain::DumpedAheadOfPlan => 12,
-        }
-    }
-
-    pub fn color(self) -> &'static str {
-        match self {
-            Domain::PlannedAndMined => "#4CAF50",
-            Domain::PlannedNotMined => "#FFEB3B",
-            Domain::MinedNotPlanned => "#F44336",
-            Domain::MinedBeforeStart => "#9C27B0",
-            Domain::PrescheduleDelay => "#FF9800",
-            Domain::AheadOfPlan => "#2196F3",
-
-            Domain::PlannedAndDumped => "#66BB6A",
-            Domain::PlannedNotDumped => "#FFF176",
-            Domain::DumpedNotPlanned => "#EF5350",
-            Domain::DumpedBeforeStart => "#AB47BC",
-            Domain::DumpPrescheduleDelay => "#FFA726",
-            Domain::DumpedAheadOfPlan => "#42A5F5",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Domain::PlannedAndMined => "Planned and Mined",
-            Domain::PlannedNotMined => "Planned Not Mined",
-            Domain::MinedNotPlanned => "Mined Not Planned",
-            Domain::MinedBeforeStart => "Mined Before Start",
-            Domain::PrescheduleDelay => "Preschedule Delay",
-            Domain::AheadOfPlan => "Ahead of Plan",
-
-            Domain::PlannedAndDumped => "Planned and Dumped",
-            Domain::PlannedNotDumped => "Planned Not Dumped",
-            Domain::DumpedNotPlanned => "Dumped Not Planned",
-            Domain::DumpedBeforeStart => "Dumped Before Start",
-            Domain::DumpPrescheduleDelay => "Dump Preschedule Delay",
-            Domain::DumpedAheadOfPlan => "Dumped Ahead of Plan",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,166 +199,6 @@ struct Interval {
     lower: f64,
 }
 
-fn classify_cell_dig(
-    ps: f64,
-    pe: f64,
-    ss: f64,
-    se: f64,
-    sf: Option<f64>,
-) -> Vec<Interval> {
-    let mut out = Vec::with_capacity(4);
-    let eps = 1e-9;
-
-    if ps > ss + eps {
-        out.push(Interval {
-            domain: Domain::PrescheduleDelay,
-            upper: ps,
-            lower: ss,
-        });
-    }
-
-    if ps < ss - eps {
-        out.push(Interval {
-            domain: Domain::MinedBeforeStart,
-            upper: ss,
-            lower: ps,
-        });
-    }
-
-    let pam_upper = ps.min(ss);
-    let pam_lower = pe.max(se);
-    if pam_upper > pam_lower + eps {
-        out.push(Interval {
-            domain: Domain::PlannedAndMined,
-            upper: pam_upper,
-            lower: pam_lower,
-        });
-    }
-
-    if pe > se + eps {
-        let pnm_upper = pe.min(ps.min(ss));
-        let pnm_lower = se;
-        if pnm_upper > pnm_lower + eps {
-            out.push(Interval {
-                domain: Domain::PlannedNotMined,
-                upper: pnm_upper,
-                lower: pnm_lower,
-            });
-        }
-    }
-
-    if pe < se - eps {
-        match sf {
-            Some(sf_val) if sf_val < se => {
-                let aop_lower = pe.max(sf_val);
-                if se > aop_lower + eps {
-                    out.push(Interval {
-                        domain: Domain::AheadOfPlan,
-                        upper: se,
-                        lower: aop_lower,
-                    });
-                }
-                if pe < sf_val - eps {
-                    out.push(Interval {
-                        domain: Domain::MinedNotPlanned,
-                        upper: sf_val,
-                        lower: pe,
-                    });
-                }
-            }
-            _ => {
-                out.push(Interval {
-                    domain: Domain::MinedNotPlanned,
-                    upper: se,
-                    lower: pe,
-                });
-            }
-        }
-    }
-
-    out
-}
-
-fn classify_cell_dump(
-    ps: f64,
-    pe: f64,
-    ss: f64,
-    se: f64,
-    sf: Option<f64>,
-) -> Vec<Interval> {
-    let mut out = Vec::with_capacity(4);
-    let eps = 1e-9;
-
-    if ps > ss + eps {
-        out.push(Interval {
-            domain: Domain::DumpedBeforeStart,
-            upper: ps,
-            lower: ss,
-        });
-    }
-
-    if ps < ss - eps {
-        out.push(Interval {
-            domain: Domain::DumpPrescheduleDelay,
-            upper: ss,
-            lower: ps,
-        });
-    }
-
-    let pad_lower = ps.max(ss);
-    let pad_upper = pe.min(se);
-    if pad_upper > pad_lower + eps {
-        out.push(Interval {
-            domain: Domain::PlannedAndDumped,
-            upper: pad_upper,
-            lower: pad_lower,
-        });
-    }
-
-    if pe < se - eps {
-        let pnd_lower = pe.max(ps.max(ss));
-        let pnd_upper = se;
-        if pnd_upper > pnd_lower + eps {
-            out.push(Interval {
-                domain: Domain::PlannedNotDumped,
-                upper: pnd_upper,
-                lower: pnd_lower,
-            });
-        }
-    }
-
-    if pe > se + eps {
-        match sf {
-            Some(sf_val) if sf_val > se => {
-                let aop_upper = pe.min(sf_val);
-                if aop_upper > se + eps {
-                    out.push(Interval {
-                        domain: Domain::DumpedAheadOfPlan,
-                        upper: aop_upper,
-                        lower: se,
-                    });
-                }
-                if pe > sf_val + eps {
-                    out.push(Interval {
-                        domain: Domain::DumpedNotPlanned,
-                        upper: pe,
-                        lower: sf_val,
-                    });
-                }
-            }
-            _ => {
-                out.push(Interval {
-                    domain: Domain::DumpedNotPlanned,
-                    upper: pe,
-                    lower: se,
-                });
-            }
-        }
-    }
-
-    out
-}
-
 fn classify_cell_no_schedule(ps: f64, pe: f64, mode: Mode) -> Vec<Interval> {
     let eps = 1e-9;
     match mode {
@@ -453,54 +230,6 @@ fn classify_cell_schedule_only(ss: f64, se: f64, mode: Mode) -> Vec<Interval> {
             lower: ss,
         }],
         _ => vec![],
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Per-vertex bound helpers — same domain formulas applied at each vertex
-// ---------------------------------------------------------------------------
-
-fn per_vertex_bounds_dig(domain: Domain, ps: f64, pe: f64, ss: f64, se: f64, sf: Option<f64>) -> (f64, f64) {
-    match domain {
-        Domain::PrescheduleDelay => (ps, ss),
-        Domain::MinedBeforeStart => (ss, ps),
-        Domain::PlannedAndMined => (ps.min(ss), pe.max(se)),
-        Domain::PlannedNotMined => (pe.min(ps.min(ss)), se),
-        Domain::MinedNotPlanned => {
-            match sf {
-                Some(sf_val) if sf_val < se => (sf_val, pe),
-                _ => (se, pe),
-            }
-        }
-        Domain::AheadOfPlan => {
-            match sf {
-                Some(sf_val) if sf_val < se => (se, pe.max(sf_val)),
-                _ => (se, pe),
-            }
-        }
-        _ => (0.0, 0.0),
-    }
-}
-
-fn per_vertex_bounds_dump(domain: Domain, ps: f64, pe: f64, ss: f64, se: f64, sf: Option<f64>) -> (f64, f64) {
-    match domain {
-        Domain::DumpedBeforeStart => (ps, ss),
-        Domain::DumpPrescheduleDelay => (ss, ps),
-        Domain::PlannedAndDumped => (pe.min(se), ps.max(ss)),
-        Domain::PlannedNotDumped => (se, pe.max(ps.max(ss))),
-        Domain::DumpedNotPlanned => {
-            match sf {
-                Some(sf_val) if sf_val > se => (pe, sf_val),
-                _ => (pe, se),
-            }
-        }
-        Domain::DumpedAheadOfPlan => {
-            match sf {
-                Some(sf_val) if sf_val > se => (pe.min(sf_val), se),
-                _ => (pe, se),
-            }
-        }
-        _ => (0.0, 0.0),
     }
 }
 
