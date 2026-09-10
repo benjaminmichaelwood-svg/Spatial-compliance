@@ -1,5 +1,7 @@
-import { useMemo, useState, useCallback, useRef } from 'react';
-import type { BoundaryRegion, ConformanceResult, Mode } from '../../types';
+import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
+import type { BoundaryRegion, ConformanceResult, Mode, SavedCameraView } from '../../types';
+import { SITE_WIDE_KEY } from '../../types';
+import type { ViewerHandle } from '../Viewer';
 import { exportCSV, exportOOT } from './exports';
 import { buildSlides, generatePPTX, type SlideData } from './pptxReport';
 import { extractTemplateTheme, type TemplateTheme } from './templateTheme';
@@ -11,23 +13,80 @@ interface Props {
   boundaries: BoundaryRegion[];
   comparisonName: string;
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  // Priority R2: the always-mounted (CSS-hidden while Reports is active)
+  // Viewer is driven through this ref to reproduce a saved camera angle
+  // before each screenshot is taken, then restored to what the user had —
+  // this capture pass must be invisible to the live 3D view.
+  viewerRef: React.RefObject<ViewerHandle | null>;
+  savedCameraViews: Map<string, SavedCameraView>;
 }
 
-export default function ReportPanel({ result, mode, boundaries, comparisonName, canvasRef }: Props) {
+export default function ReportPanel({ result, mode, boundaries, comparisonName, canvasRef, viewerRef, savedCameraViews }: Props) {
   const [generating, setGenerating] = useState(false);
   const [templateFile, setTemplateFile] = useState<File | null>(null);
   const [templateTheme, setTemplateTheme] = useState<TemplateTheme | null>(null);
   const [templateError, setTemplateError] = useState(false);
   const templateInputRef = useRef<HTMLInputElement>(null);
 
-  const viewerScreenshot = useMemo(
-    () => canvasRef.current?.toDataURL('image/png') ?? null,
-    [canvasRef.current],
-  );
+  const [viewerScreenshot, setViewerScreenshot] = useState<string | null>(null);
+  const [pitScreenshots, setPitScreenshots] = useState<Map<string, string>>(new Map());
+
+  // Priority R2: for every target (site-wide, and each pit) that has a
+  // saved camera view, apply it and capture a fresh screenshot instead of
+  // whatever the live 3D view happens to be showing — reproducing a
+  // deliberately-composed angle on every report (re)generation rather than
+  // falling back to auto-fit. A target with no saved view keeps this
+  // component's prior behavior exactly: site-wide grabs whatever's
+  // currently on the canvas (unchanged); a pit with no saved view is left
+  // out of pitScreenshots, so addViewerSlide's existing "3D Viewer
+  // Screenshot" placeholder still shows for it, same as before this item.
+  useEffect(() => {
+    let cancelled = false;
+
+    const waitForRepaint = () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      });
+
+    async function captureAll() {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const viewer = viewerRef.current;
+      const originalState = viewer?.getCameraState() ?? null;
+
+      const siteWideView = savedCameraViews.get(SITE_WIDE_KEY);
+      if (siteWideView && viewer) {
+        viewer.applyCameraState(siteWideView);
+        await waitForRepaint();
+      }
+      if (cancelled) return;
+      setViewerScreenshot(canvas.toDataURL('image/png'));
+
+      const nextPitShots = new Map<string, string>();
+      for (const b of boundaries) {
+        const view = savedCameraViews.get(b.name);
+        if (!view || !viewer) continue;
+        viewer.applyCameraState(view);
+        await waitForRepaint();
+        if (cancelled) return;
+        nextPitShots.set(b.name, canvas.toDataURL('image/png'));
+      }
+      if (!cancelled) {
+        setPitScreenshots(nextPitShots);
+      }
+
+      if (originalState && viewer) {
+        viewer.applyCameraState(originalState);
+      }
+    }
+
+    captureAll();
+    return () => { cancelled = true; };
+  }, [result, boundaries, savedCameraViews, canvasRef, viewerRef]);
 
   const initialSlides = useMemo(
-    () => buildSlides(result, mode, boundaries, comparisonName, viewerScreenshot, new Map()),
-    [result, mode, boundaries, comparisonName, viewerScreenshot],
+    () => buildSlides(result, mode, boundaries, comparisonName, viewerScreenshot, pitScreenshots),
+    [result, mode, boundaries, comparisonName, viewerScreenshot, pitScreenshots],
   );
 
   const [slides, setSlides] = useState<SlideData[]>(initialSlides);

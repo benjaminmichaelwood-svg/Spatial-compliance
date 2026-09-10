@@ -1,4 +1,4 @@
-import type { BoundaryRegion, Mode, ObjectStyle, Settings, SurfaceRole, ViewerBackground } from '../types';
+import type { BoundaryRegion, Mode, ObjectStyle, SavedCameraView, SavedCrossSectionView, Settings, SurfaceRole, ViewerBackground } from '../types';
 
 /**
  * Explicit, user-initiated Project Save/Load — a deliberate, named,
@@ -35,6 +35,16 @@ export interface ProjectFile {
   background: ViewerBackground;
   domainStyles: [string, ObjectStyle][];
   surfaceStyles: [SurfaceRole, ObjectStyle][];
+  // Priority R2 (PPTX & Reporting action list): saved report camera/
+  // cross-section views, keyed by pit/boundary name (or SITE_WIDE_KEY).
+  // Added as new optional-on-read fields rather than bumping
+  // formatVersion — an older project file simply lacks them (defaulted to
+  // [] below, same as this file's existing "lenient about extra/missing
+  // fields" philosophy for boundaries/roles etc.), and a newer file opened
+  // by a pre-R2 build is simply ignored, per this file's own documented
+  // version-tolerance design.
+  cameraViews: [string, SavedCameraView][];
+  crossSections: [string, SavedCrossSectionView][];
 }
 
 export interface BuildProjectFileInput {
@@ -46,6 +56,8 @@ export interface BuildProjectFileInput {
   background: ViewerBackground;
   domainStyles: Map<string, ObjectStyle>;
   surfaceStyles: Map<SurfaceRole, ObjectStyle>;
+  savedCameraViews: Map<string, SavedCameraView>;
+  savedCrossSections: Map<string, SavedCrossSectionView>;
 }
 
 export function buildProjectFile(input: BuildProjectFileInput): ProjectFile {
@@ -65,6 +77,8 @@ export function buildProjectFile(input: BuildProjectFileInput): ProjectFile {
     background: input.background,
     domainStyles: [...input.domainStyles.entries()],
     surfaceStyles: [...input.surfaceStyles.entries()],
+    cameraViews: [...input.savedCameraViews.entries()],
+    crossSections: [...input.savedCrossSections.entries()],
   };
 }
 
@@ -114,5 +128,7 @@ export function parseProjectFile(text: string): ProjectFile {
     background: pf.background === 'light' ? 'light' : 'dark',
     domainStyles: pf.domainStyles ?? [],
     surfaceStyles: pf.surfaceStyles ?? [],
+    cameraViews: pf.cameraViews ?? [],
+    crossSections: pf.crossSections ?? [],
   };
 }

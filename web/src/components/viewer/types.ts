@@ -18,6 +18,7 @@ import type {
   ViewerBackground,
   HeatmapMode,
   ReferenceLayer,
+  SavedCameraView,
 } from '../../types';
 import type { FlatDomainSolid } from '../../workers/engineClient';
 
@@ -113,6 +114,14 @@ export interface SectionLineOverlayProps {
 
 export interface ViewerHandle {
   applyPreset: (preset: ViewPreset) => void;
+  // Priority R2: read/apply the OrbitControls camera position + orbit
+  // target directly (not a ViewPreset) — this is the primitive a "saved
+  // report view" is built from, and what the report generator drives to
+  // reproduce a user-composed angle for a pit instead of falling back to
+  // auto-fit. Returns null if the controls aren't mounted yet (e.g. called
+  // before the Canvas has rendered a frame).
+  getCameraState: () => Omit<SavedCameraView, 'capturedAt'> | null;
+  applyCameraState: (state: Omit<SavedCameraView, 'capturedAt'>) => void;
 }
 
 export interface ViewerProps {

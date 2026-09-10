@@ -14,8 +14,10 @@ import type {
   ViewerBackground,
   SolidMesh,
   HeatmapMode,
+  SavedCameraView,
+  SavedCrossSectionView,
 } from './types';
-import { DEFAULT_SETTINGS, SURFACE_ROLES } from './types';
+import { DEFAULT_SETTINGS, SURFACE_ROLES, SITE_WIDE_KEY } from './types';
 import { initWasm, runConformance, runConformanceWithBoundaries, parseSurfaces } from './wasm';
 import {
   initWorker,
@@ -118,6 +120,17 @@ export default function App() {
   const [isDrawingSection, setIsDrawingSection] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<ViewerHandle>(null);
+
+  // Priority R2: saved report views, keyed by boundary/pit name (or
+  // SITE_WIDE_KEY when no specific pit is selected as the capture target).
+  // captureTarget is which key the next "Save View"/"Save Section" click
+  // writes to — a lightweight selector rather than inferring an "active
+  // pit" from some other interaction, since nothing else in this app
+  // (BoundaryPanel included) tracks a notion of the currently-focused
+  // boundary to infer that from.
+  const [savedCameraViews, setSavedCameraViews] = useState<Map<string, SavedCameraView>>(new Map());
+  const [savedCrossSections, setSavedCrossSections] = useState<Map<string, SavedCrossSectionView>>(new Map());
+  const [captureTarget, setCaptureTarget] = useState<string>(SITE_WIDE_KEY);
 
   const [background, setBackground] = useState<ViewerBackground>('light');
   const [domainStyles, setDomainStyles] = useState<Map<string, ObjectStyle>>(new Map());
@@ -479,9 +492,10 @@ export default function App() {
   const handleSaveProject = useCallback(() => {
     const pf = buildProjectFile({
       comparisonName, mode, settings, boundaries, uploads, background, domainStyles, surfaceStyles,
+      savedCameraViews, savedCrossSections,
     });
     downloadProjectFile(pf, comparisonName || 'spatial-compliance-project');
-  }, [comparisonName, mode, settings, boundaries, uploads, background, domainStyles, surfaceStyles]);
+  }, [comparisonName, mode, settings, boundaries, uploads, background, domainStyles, surfaceStyles, savedCameraViews, savedCrossSections]);
 
   const handleLoadProjectFile = useCallback(async (file: File) => {
     try {
@@ -494,6 +508,8 @@ export default function App() {
       setBackground(pf.background);
       setDomainStyles(new Map(pf.domainStyles));
       setSurfaceStyles(new Map(pf.surfaceStyles));
+      setSavedCameraViews(new Map(pf.cameraViews));
+      setSavedCrossSections(new Map(pf.crossSections));
       // Project files are metadata-only (see projectFile.ts) — surface
       // mesh data is never embedded, so every previously-assigned role
       // needs its file re-attached via the normal upload flow. Clearing
@@ -770,6 +786,53 @@ export default function App() {
     });
   }, []);
 
+  // Priority R2: saves the 3D viewer's current camera position/orbit target
+  // as the reusable report view for `captureTarget` (a pit name, or
+  // SITE_WIDE_KEY). When a report is later (re)generated for that same
+  // pit, ReportPanel.tsx applies this saved view (via viewerRef, since the
+  // Viewer stays mounted behind the Reports tab rather than unmounting)
+  // before taking its screenshot, instead of falling back to auto-fit.
+  const handleSaveCameraView = useCallback(() => {
+    const state = viewerRef.current?.getCameraState();
+    if (!state) return;
+    setSavedCameraViews(prev => {
+      const next = new Map(prev);
+      next.set(captureTarget, { ...state, capturedAt: Date.now() });
+      return next;
+    });
+  }, [captureTarget]);
+
+  const handleResetCameraView = useCallback(() => {
+    setSavedCameraViews(prev => {
+      if (!prev.has(captureTarget)) return prev;
+      const next = new Map(prev);
+      next.delete(captureTarget);
+      return next;
+    });
+  }, [captureTarget]);
+
+  // Same idea for the cross-section A-B line: saves the currently-defined
+  // `sectionLine` for `captureTarget` rather than CrossSectionPanel's own
+  // rendering/calculation logic, which this item explicitly leaves
+  // untouched.
+  const handleSaveCrossSectionView = useCallback(() => {
+    if (!sectionLine) return;
+    setSavedCrossSections(prev => {
+      const next = new Map(prev);
+      next.set(captureTarget, { p1: sectionLine[0], p2: sectionLine[1], capturedAt: Date.now() });
+      return next;
+    });
+  }, [captureTarget, sectionLine]);
+
+  const handleResetCrossSectionView = useCallback(() => {
+    setSavedCrossSections(prev => {
+      if (!prev.has(captureTarget)) return prev;
+      const next = new Map(prev);
+      next.delete(captureTarget);
+      return next;
+    });
+  }, [captureTarget]);
+
   // Reference layers (dropped .00t/.dxf/.arch_d overlays) — see
   // hooks/useReferenceLayers.ts (Priority 19 split this self-contained
   // feature out of App.tsx; no logic changed).
@@ -875,6 +938,9 @@ export default function App() {
           setMeasurePoints([]);
           setSelectedId(null);
           setSelectionInfo(null);
+          setSavedCameraViews(new Map());
+          setSavedCrossSections(new Map());
+          setCaptureTarget(SITE_WIDE_KEY);
           if (useWorker) workerClearSurfaces();
         }}
         canUndo={undoStack.length > 0}
@@ -896,6 +962,12 @@ export default function App() {
         onClearSection={handleClearSection}
         onStartSection={handleStartSection}
         onCapture={handleCapture}
+        boundaries={boundaries}
+        captureTarget={captureTarget}
+        onCaptureTargetChange={setCaptureTarget}
+        hasSavedCameraView={savedCameraViews.has(captureTarget)}
+        onSaveCameraView={handleSaveCameraView}
+        onResetCameraView={handleResetCameraView}
       />
 
       {/* Body */}
@@ -1013,6 +1085,8 @@ export default function App() {
                     boundaries={boundaries}
                     comparisonName={comparisonName}
                     canvasRef={canvasRef}
+                    viewerRef={viewerRef}
+                    savedCameraViews={savedCameraViews}
                   />
                 </div>
                 <div
@@ -1036,6 +1110,12 @@ export default function App() {
                         onSelectSolid={(domain) => setSelectedId(`domain:${domain}`)}
                         onStepSection={handleStepSection}
                         refLayers={refLayers}
+                        boundaries={boundaries}
+                        captureTarget={captureTarget}
+                        onCaptureTargetChange={setCaptureTarget}
+                        hasSavedCrossSection={savedCrossSections.has(captureTarget)}
+                        onSaveCrossSection={handleSaveCrossSectionView}
+                        onResetCrossSection={handleResetCrossSectionView}
                       />
                     </div>
                   ) : (

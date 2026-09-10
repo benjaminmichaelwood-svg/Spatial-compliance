@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import type { CrossSectionData, SurfaceProfile, SolidSection } from '../utils/crossSection';
-import type { SurfaceRole, UploadedSurface, ReferenceLayer, Vec3 } from '../types';
+import type { BoundaryRegion, SurfaceRole, UploadedSurface, ReferenceLayer, Vec3 } from '../types';
+import { SITE_WIDE_KEY } from '../types';
 import { computeSurfaceProfileFromArrays } from '../utils/crossSection';
 
 interface Props {
@@ -18,6 +19,19 @@ interface Props {
   onSelectSolid?: (domain: string) => void;
   onStepSection?: (offset: number) => void;
   refLayers?: ReferenceLayer[];
+
+  // Priority R2: same "which pit is this capture for" selector shown in
+  // AppHeader.tsx's toolbar, backed by the same App.tsx state — shown here
+  // too so a user working directly in the cross-section panel doesn't need
+  // to switch back to the 3D view just to pick a target. All optional so
+  // CrossSectionPanel's own tests (none currently exist, but future ones
+  // shouldn't be forced to supply this) and any other caller aren't broken.
+  boundaries?: BoundaryRegion[];
+  captureTarget?: string;
+  onCaptureTargetChange?: (target: string) => void;
+  hasSavedCrossSection?: boolean;
+  onSaveCrossSection?: () => void;
+  onResetCrossSection?: () => void;
 }
 
 interface ViewBox {
@@ -114,6 +128,12 @@ export default function CrossSectionPanel({
   onSelectSolid,
   onStepSection,
   refLayers,
+  boundaries,
+  captureTarget,
+  onCaptureTargetChange,
+  hasSavedCrossSection,
+  onSaveCrossSection,
+  onResetCrossSection,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -938,6 +958,50 @@ export default function CrossSectionPanel({
               >
                 &#9654;
               </button>
+              <div className="mx-1 h-3 w-px bg-slate-600" />
+            </>
+          )}
+          {/* Priority R2: save this cross-section's A-B line for reuse in
+              a future report generation, keyed to the shared captureTarget
+              selector (see AppHeader.tsx for the same control). Only
+              rendered when the caller wires these props — App.tsx does;
+              this stays optional so the component degrades gracefully if
+              not. */}
+          {onCaptureTargetChange && (
+            <>
+              <select
+                value={captureTarget ?? SITE_WIDE_KEY}
+                onChange={(e) => onCaptureTargetChange(e.target.value)}
+                title="Report target — which pit this saved cross-section applies to"
+                className="rounded border border-slate-600 bg-slate-700 px-1.5 py-0.5 text-[10px] font-medium text-slate-300 outline-none hover:border-slate-500"
+              >
+                <option value={SITE_WIDE_KEY}>Site-wide</option>
+                {(boundaries ?? []).map((b) => (
+                  <option key={b.name} value={b.name}>{b.name}</option>
+                ))}
+              </select>
+              <span
+                className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${hasSavedCrossSection ? 'bg-emerald-400' : 'bg-slate-600'}`}
+                title={hasSavedCrossSection ? 'This target has a saved cross-section' : 'No saved cross-section for this target'}
+              />
+              <button
+                type="button"
+                onClick={onSaveCrossSection}
+                className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white"
+                title="Save this cross-section line for report generation"
+              >
+                Save Section
+              </button>
+              {hasSavedCrossSection && (
+                <button
+                  type="button"
+                  onClick={onResetCrossSection}
+                  className="rounded px-2 py-0.5 text-[10px] font-medium text-amber-400 hover:bg-slate-700"
+                  title="Reset to no saved cross-section for this target"
+                >
+                  Reset
+                </button>
+              )}
               <div className="mx-1 h-3 w-px bg-slate-600" />
             </>
           )}

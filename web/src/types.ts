@@ -55,6 +55,28 @@ export interface BoundaryRegion {
   polygon: [number, number][];
 }
 
+// Priority R2 (PPTX & Reporting action list): a saved report view, keyed by
+// pit/boundary name (BoundaryRegion.name — the same identifier already used
+// as DomainSolid.block_name and by pptxReport.ts's buildSlides to group
+// per-pit domains) so a report can automatically reuse a deliberately
+// composed camera angle or cross-section line instead of falling back to
+// auto-fit every time it's regenerated. SITE_WIDE_KEY is used when no
+// specific pit is the capture target — there is no other "whole site"
+// identifier anywhere else in the app to collide with.
+export const SITE_WIDE_KEY = '__site_wide__';
+
+export interface SavedCameraView {
+  position: [number, number, number];
+  target: [number, number, number];
+  capturedAt: number;
+}
+
+export interface SavedCrossSectionView {
+  p1: [number, number];
+  p2: [number, number];
+  capturedAt: number;
+}
+
 export interface ConformanceSummary {
   total_planned_volume: number;
   total_actual_volume: number;

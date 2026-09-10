@@ -1,5 +1,6 @@
 import { useRef } from 'react';
-import type { MeasureTool, Mode, ViewerBackground } from '../../types';
+import type { BoundaryRegion, MeasureTool, Mode, ViewerBackground } from '../../types';
+import { SITE_WIDE_KEY } from '../../types';
 
 // Split out of App.tsx (Priority 19: behavior-preserving file breakup — no
 // logic changes; JSX moved verbatim). All state stays owned by App.tsx —
@@ -29,6 +30,18 @@ interface Props {
   onClearSection: () => void;
   onStartSection: () => void;
   onCapture: () => void;
+
+  // Priority R2 (PPTX & Reporting action list): a lightweight "which pit
+  // is this capture for" selector shared by the camera-view capture here
+  // and the cross-section capture in CrossSectionPanel — see App.tsx's
+  // captureTarget state for why this exists rather than inferring an
+  // "active pit" some other way (nothing else in the app tracks one).
+  boundaries: BoundaryRegion[];
+  captureTarget: string;
+  onCaptureTargetChange: (target: string) => void;
+  hasSavedCameraView: boolean;
+  onSaveCameraView: () => void;
+  onResetCameraView: () => void;
 }
 
 export default function AppHeader({
@@ -36,6 +49,7 @@ export default function AppHeader({
   showToolbar, background, onToggleBackground, measureTool, onMeasureToolChange,
   savedMeasurementCount, onClearMeasurements, isDrawingSection, onCancelSection,
   sectionLineActive, onClearSection, onStartSection, onCapture,
+  boundaries, captureTarget, onCaptureTargetChange, hasSavedCameraView, onSaveCameraView, onResetCameraView,
 }: Props) {
   const loadProjectInputRef = useRef<HTMLInputElement>(null);
 
@@ -218,6 +232,47 @@ export default function AppHeader({
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
           </button>
+
+          <div className="mx-1 h-4 w-px bg-slate-700" />
+
+          {/* Priority R2: saved report view for a pit — distinct from the
+              plain PNG "Capture View" button above. This one saves the
+              camera's position/orbit target so a regenerated report can
+              reproduce this exact angle for `captureTarget` automatically,
+              rather than downloading an image right now. */}
+          <select
+            value={captureTarget}
+            onChange={(e) => onCaptureTargetChange(e.target.value)}
+            title="Report target — which pit this saved view applies to"
+            className="rounded border border-slate-700 bg-slate-800 px-1.5 py-1 text-[10px] font-medium text-slate-300 outline-none hover:border-slate-600"
+          >
+            <option value={SITE_WIDE_KEY}>Site-wide</option>
+            {boundaries.map((b) => (
+              <option key={b.name} value={b.name}>{b.name}</option>
+            ))}
+          </select>
+          <span
+            className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${hasSavedCameraView ? 'bg-emerald-400' : 'bg-slate-600'}`}
+            title={hasSavedCameraView ? 'This target has a saved report view' : 'No saved view — reports auto-fit this target'}
+          />
+          <button
+            type="button"
+            onClick={onSaveCameraView}
+            className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white"
+            title={`Save current camera view for report — ${captureTarget === SITE_WIDE_KEY ? 'Site-wide' : captureTarget}`}
+          >
+            Save View
+          </button>
+          {hasSavedCameraView && (
+            <button
+              type="button"
+              onClick={onResetCameraView}
+              className="rounded px-2 py-1 text-[10px] font-medium text-amber-400 hover:bg-slate-700"
+              title="Reset to auto-fit for this target"
+            >
+              Reset
+            </button>
+          )}
         </div>
       )}
     </header>

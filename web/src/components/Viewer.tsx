@@ -84,6 +84,29 @@ const Viewer = forwardRef<ViewerHandle, ViewerProps>(function Viewer({
 
   useImperativeHandle(ref, () => ({
     applyPreset: (preset: ViewPreset) => setViewPreset(preset),
+    // Priority R2: controlsRef.current is drei's OrbitControls instance
+    // (bound via ControlsBinder's `camera.__controls` pattern used
+    // elsewhere in this file) — `.object` is the camera it drives,
+    // `.target` is the orbit pivot point. Reading/writing both together
+    // is the complete camera state for this app's perspective-only,
+    // Z-up-enforced camera (no orthographic zoom is used anywhere else
+    // in this codebase, so it's deliberately not part of this state).
+    getCameraState: () => {
+      const controls = controlsRef.current;
+      if (!controls) return null;
+      const cam = controls.object as THREE.PerspectiveCamera;
+      return {
+        position: [cam.position.x, cam.position.y, cam.position.z],
+        target: [controls.target.x, controls.target.y, controls.target.z],
+      };
+    },
+    applyCameraState: (state) => {
+      const controls = controlsRef.current;
+      if (!controls) return;
+      controls.object.position.set(...state.position);
+      controls.target.set(...state.target);
+      controls.update();
+    },
   }), []);
 
   const heatmapThickness = useMemo(() => {
