@@ -49,6 +49,7 @@ import { classifyEmptyResult, type ClassifiedError } from './utils/errorClassifi
 import { validateSurfaceFile } from './utils/fileValidation';
 import { saveSession, loadSession, clearSession, debounce, type PersistedSession } from './utils/sessionPersistence';
 import RestorePrompt from './components/RestorePrompt';
+import { buildProjectFile, downloadProjectFile, parseProjectFile, ProjectFileParseError } from './utils/projectFile';
 
 
 function makeSampleUpload(z: number, name: string, role: SurfaceRole, fileName: string, size = 20): UploadedSurface {
@@ -142,6 +143,11 @@ export default function App() {
   const [refLayers, setRefLayers] = useState<ReferenceLayer[]>([]);
   const refIdRef = useRef(0);
   const [restorableSession, setRestorableSession] = useState<PersistedSession | null>(null);
+  // Roles a loaded Project file expects but whose surface data isn't
+  // embedded (see projectFile.ts) — keyed by role, valued by the
+  // originally-recorded filename shown as a hint, not a hard requirement.
+  const [pendingReattachments, setPendingReattachments] = useState<Map<SurfaceRole, string>>(new Map());
+  const loadProjectInputRef = useRef<HTMLInputElement>(null);
 
 
   useEffect(() => {
@@ -402,6 +408,12 @@ export default function App() {
         next.set(role, upload);
         setUploads(next);
         setSurfaceVisible(prev => new Set([...prev, role]));
+        setPendingReattachments(prev => {
+          if (!prev.has(role)) return prev;
+          const m = new Map(prev);
+          m.delete(role);
+          return m;
+        });
 
       } catch (e: any) {
         setError(e.message || String(e));
@@ -446,6 +458,47 @@ export default function App() {
     },
     [uploads, useWorker],
   );
+
+  const handleSaveProject = useCallback(() => {
+    const pf = buildProjectFile({
+      comparisonName, mode, settings, boundaries, uploads, background, domainStyles, surfaceStyles,
+    });
+    downloadProjectFile(pf, comparisonName || 'spatial-compliance-project');
+  }, [comparisonName, mode, settings, boundaries, uploads, background, domainStyles, surfaceStyles]);
+
+  const handleLoadProjectFile = useCallback(async (file: File) => {
+    try {
+      const text = await file.text();
+      const pf = parseProjectFile(text);
+      setComparisonName(pf.comparisonName);
+      setMode(pf.mode);
+      setSettings(pf.settings);
+      setBoundaries(pf.boundaries);
+      setBackground(pf.background);
+      setDomainStyles(new Map(pf.domainStyles));
+      setSurfaceStyles(new Map(pf.surfaceStyles));
+      // Project files are metadata-only (see projectFile.ts) — surface
+      // mesh data is never embedded, so every previously-assigned role
+      // needs its file re-attached via the normal upload flow. Clearing
+      // uploads/result here (rather than leaving stale data mismatched
+      // against the newly-loaded settings/boundaries) makes that explicit
+      // rather than silently misleading.
+      setUploads(new Map());
+      setSurfaceVisible(new Set());
+      setResult(null);
+      setFlatDomains([]);
+      setVisible(new Set<string>());
+      if (useWorker) workerClearSurfaces();
+      setPendingReattachments(new Map(pf.roles.map((r) => [r.role, r.fileName])));
+      setStep('workspace');
+    } catch (e) {
+      setError({
+        title: 'Could not load this project file',
+        message: e instanceof ProjectFileParseError ? e.message : 'An unexpected error occurred while reading this file.',
+        raw: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }, [useWorker]);
 
   const handleLoadSample = useCallback(() => {
     const sampleSurfaces: Record<SurfaceRole, { z: number; label: string }> =
@@ -835,7 +888,7 @@ export default function App() {
   if (step === 'landing') {
     return (
       <>
-        <LandingPage onStart={handleStart} />
+        <LandingPage onStart={handleStart} onLoadProject={handleLoadProjectFile} />
         {restorableSession && (
           <RestorePrompt
             session={restorableSession}
@@ -911,6 +964,35 @@ export default function App() {
           >
             {mode}
           </span>
+          <div className="ml-2 flex items-center gap-1 border-l border-slate-700 pl-2">
+            <button
+              type="button"
+              onClick={handleSaveProject}
+              title="Save Project — download a file capturing settings, roles, and boundaries (not the surface data itself)"
+              className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"
+            >
+              Save Project
+            </button>
+            <button
+              type="button"
+              onClick={() => loadProjectInputRef.current?.click()}
+              title="Load Project — restore settings/roles/boundaries from a saved project file, then re-attach surface files"
+              className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"
+            >
+              Load Project
+            </button>
+            <input
+              ref={loadProjectInputRef}
+              type="file"
+              accept=".json"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleLoadProjectFile(file);
+                e.target.value = '';
+              }}
+            />
+          </div>
         </div>
 
         {/* Toolbar */}
@@ -1032,6 +1114,7 @@ export default function App() {
             onFileSelected={handleFileSelected}
             onLoadSample={handleLoadSample}
             onRemoveSurface={handleRemoveSurface}
+            pendingReattachments={pendingReattachments}
           />
           <SettingsPanel settings={settings} onChange={setSettings} />
           <BoundaryPanel

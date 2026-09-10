@@ -7,9 +7,11 @@ interface Props {
   onFileSelected: (role: SurfaceRole, file: File) => void;
   onLoadSample: () => void;
   onRemoveSurface: (role: SurfaceRole) => void;
+  /** Roles a loaded Project file expects re-attached — see projectFile.ts. Filename shown is a hint, not enforced. */
+  pendingReattachments?: Map<SurfaceRole, string>;
 }
 
-export default function UploadZone({ uploads, onFileSelected, onLoadSample, onRemoveSurface }: Props) {
+export default function UploadZone({ uploads, onFileSelected, onLoadSample, onRemoveSurface, pendingReattachments }: Props) {
   const fileInputRefs = useRef<Map<SurfaceRole, HTMLInputElement>>(new Map());
 
   const handleDrop = useCallback(
@@ -42,6 +44,7 @@ export default function UploadZone({ uploads, onFileSelected, onLoadSample, onRe
       <div className="space-y-2">
         {SURFACE_ROLES.map(({ key, label }) => {
           const entry = uploads.get(key);
+          const reattachFileName = !entry ? pendingReattachments?.get(key) : undefined;
           return (
             <div
               key={key}
@@ -51,6 +54,8 @@ export default function UploadZone({ uploads, onFileSelected, onLoadSample, onRe
               className={`group flex cursor-pointer items-center gap-2 rounded-lg border border-dashed px-3 py-2 text-xs transition-colors ${
                 entry
                   ? 'border-emerald-500/40 bg-emerald-500/10'
+                  : reattachFileName
+                  ? 'border-amber-500/50 bg-amber-500/10 hover:border-amber-400'
                   : 'border-slate-600 hover:border-slate-400 hover:bg-white/5'
               }`}
             >
@@ -73,13 +78,18 @@ export default function UploadZone({ uploads, onFileSelected, onLoadSample, onRe
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
                   <span className="font-medium text-slate-300">{label}</span>
-                  {!entry && (
+                  {!entry && !reattachFileName && (
                     <span className="text-[9px] text-slate-600">Optional</span>
                   )}
                 </div>
                 {entry && (
                   <div className="truncate text-[10px] text-slate-500">
                     {entry.fileName}
+                  </div>
+                )}
+                {reattachFileName && (
+                  <div className="truncate text-[10px] text-amber-500">
+                    Re-attach: {reattachFileName}
                   </div>
                 )}
               </div>

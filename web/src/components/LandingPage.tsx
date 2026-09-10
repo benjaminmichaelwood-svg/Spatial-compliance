@@ -1,13 +1,15 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { Mode } from '../types';
 
 interface Props {
   onStart: (name: string, mode: Mode) => void;
+  onLoadProject: (file: File) => void;
 }
 
-export default function LandingPage({ onStart }: Props) {
+export default function LandingPage({ onStart, onLoadProject }: Props) {
   const [name, setName] = useState('');
   const [mode, setMode] = useState<Mode | null>(null);
+  const loadInputRef = useRef<HTMLInputElement>(null);
 
   return (
     <div className="flex h-screen items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100">
@@ -89,6 +91,25 @@ export default function LandingPage({ onStart }: Props) {
           >
             Create Comparison
           </button>
+
+          <button
+            type="button"
+            onClick={() => loadInputRef.current?.click()}
+            className="mt-3 w-full text-center text-xs font-medium text-indigo-600 hover:text-indigo-700"
+          >
+            or load a saved Project file…
+          </button>
+          <input
+            ref={loadInputRef}
+            type="file"
+            accept=".json"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) onLoadProject(file);
+              e.target.value = '';
+            }}
+          />
         </div>
       </div>
     </div>
