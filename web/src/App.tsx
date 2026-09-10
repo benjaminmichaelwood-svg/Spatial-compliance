@@ -47,6 +47,8 @@ import DomainLegend from './components/DomainLegend';
 import ErrorBanner from './components/ErrorBanner';
 import { classifyEmptyResult, type ClassifiedError } from './utils/errorClassification';
 import { validateSurfaceFile } from './utils/fileValidation';
+import { saveSession, loadSession, clearSession, debounce, type PersistedSession } from './utils/sessionPersistence';
+import RestorePrompt from './components/RestorePrompt';
 
 
 function makeSampleUpload(z: number, name: string, role: SurfaceRole, fileName: string, size = 20): UploadedSurface {
@@ -139,6 +141,7 @@ export default function App() {
   const [heatmapMode, setHeatmapMode] = useState<HeatmapMode | null>(null);
   const [refLayers, setRefLayers] = useState<ReferenceLayer[]>([]);
   const refIdRef = useRef(0);
+  const [restorableSession, setRestorableSession] = useState<PersistedSession | null>(null);
 
 
   useEffect(() => {
@@ -155,6 +158,93 @@ export default function App() {
         initWasm().then(() => setWasmReady(true));
       });
   }, []);
+
+  // Crash/refresh recovery: check once, on mount, for a session saved by
+  // the auto-save effect further below. Never auto-restores or
+  // auto-discards — the user explicitly chooses via RestorePrompt.
+  useEffect(() => {
+    loadSession()
+      .then((session) => {
+        if (session) setRestorableSession(session);
+      })
+      .catch((e) => console.warn('Failed to check for a saved session:', e));
+  }, []);
+
+  const handleRestoreSession = useCallback(async () => {
+    const session = restorableSession;
+    if (!session) return;
+    setStep('workspace');
+    setComparisonName(session.comparisonName);
+    setMode(session.mode);
+    setSettings(session.settings);
+    setBoundaries(session.boundaries);
+    setRestorableSession(null);
+
+    const restoredUploads = new Map<SurfaceRole, UploadedSurface>();
+    for (const r of session.roles) {
+      if (!r.positions || !r.indices) continue; // truncated (quota) — needs re-attaching, not restorable
+      if (useWorker) {
+        // Restoring React state alone isn't enough: Run Conformance (the
+        // worker path) reads from the WORKER's own storedSurfaceBinaries/
+        // storedSurfaceJsons maps, which a plain setUploads() never
+        // touches — that surface would silently act as "not provided" to
+        // the classifier, producing a spurious "no overlap" result. Route
+        // through the same worker registration path a normal upload uses
+        // (as JSON, since we already have parsed data — no need to
+        // re-encode back to .00t binary and re-parse that).
+        const vertices: Vec3[] = [];
+        for (let i = 0; i < r.vertexCount; i++) {
+          vertices.push({ x: r.positions[i * 3], y: r.positions[i * 3 + 1], z: r.positions[i * 3 + 2] });
+        }
+        const indices: [number, number, number][] = [];
+        for (let i = 0; i < r.triangleCount; i++) {
+          indices.push([r.indices[i * 3], r.indices[i * 3 + 1], r.indices[i * 3 + 2]]);
+        }
+        const surface: TriSurface = { name: r.name, vertices, indices };
+        try {
+          const flat = await workerParseSurfaceJson(r.role, JSON.stringify(surface), r.fileName);
+          restoredUploads.set(r.role, {
+            role: r.role, fileName: r.fileName, name: flat.name,
+            positions: flat.positions, indices: flat.indices,
+            vertexCount: flat.vertexCount, triangleCount: flat.triangleCount,
+          });
+        } catch (e) {
+          console.warn(`Failed to restore surface for role ${r.role}:`, e);
+        }
+      } else {
+        restoredUploads.set(r.role, {
+          role: r.role, fileName: r.fileName, name: r.name,
+          positions: r.positions, indices: r.indices,
+          vertexCount: r.vertexCount, triangleCount: r.triangleCount,
+        });
+      }
+    }
+    setUploads(restoredUploads);
+    setSurfaceVisible(new Set(restoredUploads.keys()));
+  }, [restorableSession, useWorker]);
+
+  const handleDiscardSession = useCallback(() => {
+    setRestorableSession(null);
+    clearSession().catch((e) => console.warn('Failed to clear saved session:', e));
+  }, []);
+
+  // Debounced auto-save: fires on meaningful state changes, not every
+  // keystroke/click. Only runs once the user is actually in the workspace
+  // (nothing to save from the landing page) and skips entirely while a
+  // restore prompt is pending, so it can't overwrite the very session
+  // being offered for restore before the user has chosen.
+  const debouncedSave = useMemo(
+    () =>
+      debounce((input: Parameters<typeof saveSession>[0]) => {
+        saveSession(input).catch((e) => console.warn('Auto-save failed:', e));
+      }, 2000),
+    [],
+  );
+  useEffect(() => {
+    if (step !== 'workspace' || restorableSession) return;
+    if (uploads.size === 0) return; // nothing meaningful to save yet
+    debouncedSave({ comparisonName, mode, settings, boundaries, uploads });
+  }, [step, restorableSession, comparisonName, mode, settings, boundaries, uploads, debouncedSave]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -743,7 +833,18 @@ export default function App() {
 
 
   if (step === 'landing') {
-    return <LandingPage onStart={handleStart} />;
+    return (
+      <>
+        <LandingPage onStart={handleStart} />
+        {restorableSession && (
+          <RestorePrompt
+            session={restorableSession}
+            onRestore={handleRestoreSession}
+            onDiscard={handleDiscardSession}
+          />
+        )}
+      </>
+    );
   }
 
   const canRun = uploads.size >= 2;
