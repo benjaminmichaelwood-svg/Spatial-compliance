@@ -44,6 +44,8 @@ import { parseOot } from './utils/ootParser';
 import { parseDxf } from './utils/dxfRefParser';
 import { parseArchd } from './utils/archdParser';
 import DomainLegend from './components/DomainLegend';
+import ErrorBanner from './components/ErrorBanner';
+import { classifyEmptyResult, type ClassifiedError } from './utils/errorClassification';
 
 
 function makeSampleUpload(z: number, name: string, role: SurfaceRole, fileName: string, size = 20): UploadedSurface {
@@ -108,7 +110,7 @@ export default function App() {
   const [flatDomains, setFlatDomains] = useState<FlatDomainSolid[]>([]);
   const [visible, setVisible] = useState<Set<string>>(new Set());
   const [isRunning, setIsRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | ClassifiedError | null>(null);
   const [boundaries, setBoundaries] = useState<BoundaryRegion[]>([]);
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawPoints, setDrawPoints] = useState<[number, number][]>([]);
@@ -281,9 +283,10 @@ export default function App() {
             const data = new Uint8Array(buffer);
             const surfaces = parseSurfaces(data);
             if (surfaces.length === 0) {
-              setProgress(null);
-              alert(`No surfaces found in ${file.name}`);
-              return;
+              // Route through the same classified error banner as every
+              // other failure instead of a native alert() — see
+              // ErrorBanner / errorClassification.ts.
+              throw new Error(`No surfaces found in ${file.name}`);
             }
             const surface = surfaces[0];
             surface.name = surface.name || file.name.replace(/\.[^.]+$/, '');
@@ -375,6 +378,10 @@ export default function App() {
         setVisible(new Set<string>());
         setSurfaceVisible(new Set<SurfaceRole>());
 
+        const totalVol = domainSolids.reduce((s, d) => s + d.volume, 0);
+        const emptyResult = classifyEmptyResult(totalVol, domainSolids.length);
+        if (emptyResult) setError(emptyResult);
+
         if (flatResult.domainMaps) {
           const maps = new Map<SurfaceRole, Uint8Array>();
           for (const [role, arr] of Object.entries(flatResult.domainMaps)) {
@@ -440,6 +447,10 @@ export default function App() {
         setResult(res);
         setVisible(new Set(res.domains.map((d) => d.domain)));
         setSurfaceVisible(new Set<SurfaceRole>());
+
+        const totalVol = res.domains.reduce((s, d) => s + d.volume, 0);
+        const emptyResult = classifyEmptyResult(totalVol, res.domains.length);
+        if (emptyResult) setError(emptyResult);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -909,7 +920,6 @@ export default function App() {
                 </>
               )}
             </button>
-            {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
           </div>
 
           {/* Tab switcher */}
@@ -1190,6 +1200,8 @@ export default function App() {
           </button>
         </div>
       )}
+
+      <ErrorBanner error={error} onDismiss={() => setError(null)} />
     </div>
   );
 }
