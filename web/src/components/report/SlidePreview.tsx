@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import type { SlideData } from './pptxReport';
+import type { PitDomainVolumes, SlideData } from './pptxReport';
 import type { TemplateTheme } from './templateTheme';
 import WaterfallChart from './WaterfallChart';
 import DonutGauge from './DonutGauge';
@@ -20,9 +20,80 @@ function formatVol(v: number): string {
   return v.toFixed(1);
 }
 
+// Priority R4: compact per-domain volume table shown alongside the
+// existing gauges/KPIs on a pit-viewer slide's live preview — reads
+// exclusively from slide.domainVolumes (the exact confVol/pnmVol/etc.
+// buildSlides already computed to derive plannedVol/actualVol/
+// conformancePct/productionPct) so it can never disagree with the gauges
+// or KPI numbers on the same slide. Uses abbreviations (getDomainDefs'
+// own `.abbrev`, the same set the Definitions slide's legend already
+// shows) rather than full names — this preview column is only ~176px
+// wide, nowhere near the ~5.6" this table gets in the actual exported
+// slide (addViewerSlide/buildDomainTableRows), so it's a compact
+// adaptation for the space available, not a different set of numbers.
+function DomainVolumeRow({ label, color, vol }: { label: string; color?: string; vol: number }) {
+  return (
+    <div className="flex items-center justify-between gap-1">
+      <span className="flex min-w-0 items-center gap-1">
+        {color && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-sm" style={{ backgroundColor: color }} />}
+        <span className="truncate text-[7px] text-slate-600">{label}</span>
+      </span>
+      <span className="flex-shrink-0 text-[7px] font-medium text-slate-700">{formatVol(vol)}</span>
+    </div>
+  );
+}
+
+function DomainVolumeTable({ slide, dv }: { slide: SlideData; dv: PitDomainVolumes }) {
+  const defs = getDomainDefs(slide.mode);
+  const byKey = new Map(defs.map(d => [d.key, d]));
+  const conformKey = slide.mode === 'dig' ? 'PlannedAndMined' : 'PlannedAndDumped';
+  const pnmKey = slide.mode === 'dig' ? 'PlannedNotMined' : 'PlannedNotDumped';
+  const mbsKey = slide.mode === 'dig' ? 'MinedBeforeStart' : 'DumpedBeforeStart';
+  const mnpKey = slide.mode === 'dig' ? 'MinedNotPlanned' : 'DumpedNotPlanned';
+  const psdKey = slide.mode === 'dig' ? 'PrescheduleDelay' : 'DumpPrescheduleDelay';
+  const aopKey = slide.mode === 'dig' ? 'AheadOfPlan' : 'DumpedAheadOfPlan';
+  const actionLabel = slide.mode === 'dig' ? 'Mined' : 'Dumped';
+
+  return (
+    <div className="w-full space-y-1.5 border-t border-slate-200 pt-2">
+      <div>
+        <div className="mb-0.5 text-[7px] font-semibold uppercase tracking-wide text-slate-400">Plan</div>
+        <DomainVolumeRow label={byKey.get(conformKey)?.abbrev ?? conformKey} color={byKey.get(conformKey)?.color} vol={dv.confVol} />
+        <DomainVolumeRow label={byKey.get(pnmKey)?.abbrev ?? pnmKey} color={byKey.get(pnmKey)?.color} vol={dv.pnmVol} />
+        <DomainVolumeRow label={byKey.get(mbsKey)?.abbrev ?? mbsKey} color={byKey.get(mbsKey)?.color} vol={dv.mbsVol} />
+        <div className="flex items-center justify-between border-t border-slate-100 pt-0.5 text-[7px] font-semibold text-slate-700">
+          <span>Subtotal</span>
+          <span>{formatVol(dv.planned)}</span>
+        </div>
+      </div>
+      <div>
+        <div className="mb-0.5 text-[7px] font-semibold uppercase tracking-wide text-slate-400">{actionLabel}</div>
+        <DomainVolumeRow label={byKey.get(conformKey)?.abbrev ?? conformKey} color={byKey.get(conformKey)?.color} vol={dv.confVol} />
+        <DomainVolumeRow label={byKey.get(mnpKey)?.abbrev ?? mnpKey} color={byKey.get(mnpKey)?.color} vol={dv.mnpVol} />
+        <DomainVolumeRow label={byKey.get(psdKey)?.abbrev ?? psdKey} color={byKey.get(psdKey)?.color} vol={dv.psdVol} />
+        <DomainVolumeRow label={byKey.get(aopKey)?.abbrev ?? aopKey} color={byKey.get(aopKey)?.color} vol={dv.aopVol} />
+        <div className="flex items-center justify-between border-t border-slate-100 pt-0.5 text-[7px] font-semibold text-slate-700">
+          <span>Subtotal</span>
+          <span>{formatVol(dv.actual)}</span>
+        </div>
+      </div>
+      <div className="space-y-0.5 border-t border-slate-200 pt-1">
+        <div className="flex items-center justify-between text-[7px]">
+          <span className="text-slate-400">Plan Compliance %</span>
+          <span className="font-semibold text-slate-700">{slide.conformancePct.toFixed(1)}%</span>
+        </div>
+        <div className="flex items-center justify-between text-[7px]">
+          <span className="text-slate-400">Plan Performance %</span>
+          <span className="font-semibold text-slate-700">{slide.productionPct.toFixed(1)}%</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ViewerSlideContent({ slide, templateTheme }: { slide: SlideData; templateTheme?: TemplateTheme | null }) {
   return (
-    <div className="flex h-full w-full gap-3 p-4">
+    <div className="flex h-full w-full gap-3 overflow-y-auto p-4">
       <div className="relative flex-1 overflow-hidden rounded-lg bg-slate-100">
         {slide.viewerScreenshot ? (
           <img
@@ -51,7 +122,7 @@ function ViewerSlideContent({ slide, templateTheme }: { slide: SlideData; templa
           mode="production"
           accentColor={templateTheme ? `#${templateTheme.accentColor}` : undefined}
         />
-        <div className="mt-auto grid w-full grid-cols-3 gap-1 text-center">
+        <div className="grid w-full grid-cols-3 gap-1 text-center">
           <div>
             <div className="text-[9px] text-slate-400">Planned</div>
             <div className="text-[11px] font-semibold text-slate-700">{formatVol(slide.plannedVol)}</div>
@@ -65,6 +136,7 @@ function ViewerSlideContent({ slide, templateTheme }: { slide: SlideData; templa
             <div className="text-[11px] font-semibold text-slate-700">{formatVol(slide.plannedVol - slide.actualVol)}</div>
           </div>
         </div>
+        {slide.domainVolumes && <DomainVolumeTable slide={slide} dv={slide.domainVolumes} />}
       </div>
     </div>
   );

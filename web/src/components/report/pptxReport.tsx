@@ -6,6 +6,26 @@ import { getDomainDefs } from './definitionsData';
 import type { TemplateTheme } from './templateTheme';
 import { renderComponentToImage } from './renderComponentToImage';
 
+// Priority R4: the exact per-domain volumes buildSlides already computes
+// (via the sumOf/confVol/pnmVol/etc. pattern) to derive plannedVol/
+// actualVol/conformancePct/productionPct — captured here instead of
+// discarded, so the data table can show the same numbers those other
+// fields are built from rather than recomputing anything. confVol
+// ("Planned and Mined"/"Planned and Dumped") deliberately appears in both
+// the Plan and Mined/Dumped subtotals below, matching classify.rs's own
+// total_planned_volume/total_actual_volume formulas exactly — it
+// genuinely belongs to both totals, not a double-count bug.
+export interface PitDomainVolumes {
+  confVol: number;
+  pnmVol: number;
+  mbsVol: number;
+  mnpVol: number;
+  psdVol: number;
+  aopVol: number;
+  planned: number;
+  actual: number;
+}
+
 export interface SlideData {
   id: string;
   type: 'definitions' | 'pit-viewer' | 'pit-waterfall' | 'pit-section' | 'summary-viewer' | 'summary-waterfall';
@@ -24,6 +44,9 @@ export interface SlideData {
   // means no saved cross-section exists for this pit — addCrossSectionSlide
   // renders a graceful placeholder rather than leaving the slide blank.
   crossSectionImage: string | null;
+  // Priority R4: set only on 'pit-viewer' slides — the data table renders
+  // alongside the existing gauges/KPIs there. null everywhere else.
+  domainVolumes: PitDomainVolumes | null;
 }
 
 function formatVol(v: number): string {
@@ -197,6 +220,59 @@ async function addDefinitionsSlide(
   return slide;
 }
 
+// Priority R4: compact Plan / Mined-or-Dumped domain-volume table for a
+// pit-viewer slide. Pulls every number from `dv` (PitDomainVolumes) — the
+// exact same confVol/pnmVol/mbsVol/mnpVol/psdVol/aopVol/planned/actual
+// values buildSlides already computed via its sumOf(...) pattern to derive
+// plannedVol/actualVol — never recomputed here. Domain names/colors come
+// from getDomainDefs(mode), the same source the Definitions slide's own
+// legend table uses, so labels can't drift between the two slides either.
+function buildDomainTableRows(mode: Mode, dv: PitDomainVolumes): any[][] {
+  const defs = getDomainDefs(mode);
+  const byKey = new Map(defs.map(d => [d.key, d]));
+  const conformKey = mode === 'dig' ? 'PlannedAndMined' : 'PlannedAndDumped';
+  const pnmKey = mode === 'dig' ? 'PlannedNotMined' : 'PlannedNotDumped';
+  const mbsKey = mode === 'dig' ? 'MinedBeforeStart' : 'DumpedBeforeStart';
+  const mnpKey = mode === 'dig' ? 'MinedNotPlanned' : 'DumpedNotPlanned';
+  const psdKey = mode === 'dig' ? 'PrescheduleDelay' : 'DumpPrescheduleDelay';
+  const aopKey = mode === 'dig' ? 'AheadOfPlan' : 'DumpedAheadOfPlan';
+  const actionLabel = mode === 'dig' ? 'Mined' : 'Dumped';
+
+  const rowOpts = { fontSize: 7, color: '333333' };
+  const valueOpts = { ...rowOpts, align: 'right' as const };
+  const headerOpts = { bold: true, fontSize: 7.5, fill: { color: 'E8E8E8' }, color: '333333' };
+  const subtotalOpts = { bold: true, fontSize: 7.5, color: '1a1a19', fill: { color: 'F1F5F9' } };
+  const subtotalValueOpts = { ...subtotalOpts, align: 'right' as const };
+
+  const row = (key: string, vol: number) => [
+    { text: '', options: { fill: { color: (byKey.get(key)?.color ?? '#CCCCCC').replace('#', '') } } },
+    { text: byKey.get(key)?.name ?? key, options: rowOpts },
+    { text: `${formatVol(vol)} m³`, options: valueOpts },
+  ];
+  const sectionHeader = (label: string) => [
+    { text: label, options: { ...headerOpts, colspan: 3 } },
+  ];
+  const subtotalRow = (label: string, vol: number) => [
+    { text: '', options: { fill: { color: 'F1F5F9' } } },
+    { text: label, options: subtotalOpts },
+    { text: `${formatVol(vol)} m³`, options: subtotalValueOpts },
+  ];
+
+  return [
+    sectionHeader('Plan'),
+    row(conformKey, dv.confVol),
+    row(pnmKey, dv.pnmVol),
+    row(mbsKey, dv.mbsVol),
+    subtotalRow('Subtotal', dv.planned),
+    sectionHeader(actionLabel),
+    row(conformKey, dv.confVol),
+    row(mnpKey, dv.mnpVol),
+    row(psdKey, dv.psdVol),
+    row(aopKey, dv.aopVol),
+    subtotalRow('Subtotal', dv.actual),
+  ];
+}
+
 function addViewerSlide(
   pptx: PptxGenJS,
   data: SlideData,
@@ -251,6 +327,47 @@ function addViewerSlide(
       fontSize: 10, bold: true, color: '333333',
     });
   });
+
+  // Priority R4: compact per-domain data table, in the unused space below
+  // the existing gauges/KPIs — those are left completely unchanged per
+  // this item's own constraint, this only adds to the slide, never
+  // replaces anything on it. Only present on pit-viewer slides
+  // (data.domainVolumes is null for summary-viewer).
+  if (data.domainVolumes) {
+    const tableY = 4.3;
+    const rowH = 0.22;
+    const tableRows = buildDomainTableRows(data.mode, data.domainVolumes);
+    slide.addTable(tableRows, {
+      x: 7.3, y: tableY, w: 5.6,
+      colW: [0.18, 3.6, 1.82],
+      border: { type: 'solid', pt: 0.5, color: 'E2E2DD' },
+      rowH,
+      margin: [1, 3, 1, 3],
+      autoPage: false,
+    } as any);
+
+    // Plan Compliance % / Plan Performance % — these ARE
+    // data.conformancePct/data.productionPct (the exact same numbers the
+    // two donut gauges above already show), not a separate definition —
+    // confirmed against classify.rs's formulas before implementing this
+    // item (see CLAUDE.md's R4 notes).
+    const pctY = tableY + tableRows.length * rowH + 0.08;
+    const pctRows = [
+      { label: 'Plan Compliance %', value: data.conformancePct },
+      { label: 'Plan Performance %', value: data.productionPct },
+    ];
+    pctRows.forEach((r, i) => {
+      const ry = pctY + i * 0.26;
+      slide.addText(r.label, {
+        x: 7.3, y: ry, w: 3.6, h: 0.22,
+        fontSize: 7.5, color: '898781',
+      });
+      slide.addText(`${r.value.toFixed(1)}%`, {
+        x: 10.9, y: ry, w: 2.0, h: 0.22,
+        fontSize: 7.5, bold: true, color: '333333', align: 'right',
+      });
+    });
+  }
 
   return slide;
 }
@@ -345,6 +462,7 @@ export function buildSlides(
     actualVol: 0,
     viewerScreenshot: null,
     crossSectionImage: null,
+    domainVolumes: null,
   });
 
   // Domain sets must match classify.rs's ConformanceSummary exactly
@@ -392,6 +510,11 @@ export function buildSlides(
       actualVol: actual,
       viewerScreenshot: pitScreenshots.get(b.name) ?? null,
       crossSectionImage: null,
+      // Priority R4: the exact per-domain volumes already computed above
+      // to derive planned/actual/confPct/prodPct — captured instead of
+      // discarded so the data table shows the same numbers those fields
+      // are built from, not a re-derivation.
+      domainVolumes: { confVol, pnmVol, mbsVol, mnpVol, psdVol, aopVol, planned, actual },
     });
 
     slides.push({
@@ -408,6 +531,7 @@ export function buildSlides(
       actualVol: actual,
       viewerScreenshot: null,
       crossSectionImage: null,
+      domainVolumes: null,
     });
 
     slides.push({
@@ -424,6 +548,7 @@ export function buildSlides(
       actualVol: actual,
       viewerScreenshot: null,
       crossSectionImage: pitCrossSectionImages.get(b.name) ?? null,
+      domainVolumes: null,
     });
   }
 
@@ -445,6 +570,7 @@ export function buildSlides(
     actualVol: allActual,
     viewerScreenshot,
     crossSectionImage: null,
+    domainVolumes: null,
   });
 
   slides.push({
@@ -460,6 +586,7 @@ export function buildSlides(
     actualVol: allActual,
     viewerScreenshot: null,
     crossSectionImage: null,
+    domainVolumes: null,
   });
 
   return slides;
