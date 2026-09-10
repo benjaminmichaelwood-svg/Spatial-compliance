@@ -5,7 +5,27 @@ const VERTEX_COUNT_OFFSET: usize = 0x48;
 const TRIANGLE_COUNT_OFFSET: usize = 0x60;
 const VERTEX_START: usize = 0x78;
 
+// A compressed "vulZ" .00t variant exists but is NOT yet supported — its
+// compression scheme and post-magic-bytes header layout are undocumented,
+// and no sample file is available in this codebase to validate a parser
+// against (see CLAUDE.md's Master Priority 17 for the full research
+// writeup). Detecting these magic bytes costs nothing and turns what would
+// otherwise be a confusing "vertex count is zero" or truncation error (from
+// blindly reading compressed bytes as if they were the uncompressed
+// layout) into an honest, actionable one. The frontend's fileValidation.ts
+// checks this too, pre-upload — this check is defense-in-depth for any
+// caller that reaches decode_surfaces directly.
+const VULZ_MAGIC: [u8; 8] = [0xea, 0xfb, 0xa7, 0x8a, 0x76, 0x75, 0x6c, 0x5a];
+
 pub fn decode_surfaces(data: &[u8]) -> Result<Vec<TriSurface>, String> {
+    if data.len() >= VULZ_MAGIC.len() && data[..VULZ_MAGIC.len()] == VULZ_MAGIC {
+        return Err(
+            "This is a compressed vulZ-format .00t file, which is not yet supported. \
+             Re-export or re-save it as an uncompressed .00t file in Vulcan, then try again."
+                .into(),
+        );
+    }
+
     if data.len() < HEADER_SIZE {
         return Err(format!(
             "File too small: {} bytes (minimum {})",
@@ -288,6 +308,17 @@ mod tests {
     fn rejects_truncated() {
         let data = vec![0u8; 10];
         assert!(decode_surfaces(&data).is_err());
+    }
+
+    #[test]
+    fn rejects_vulz_magic_with_clear_message() {
+        // A real vulZ file's compressed payload would follow these 8 bytes,
+        // but detection only needs the magic — the rest is irrelevant here.
+        let mut data = vec![0xea, 0xfb, 0xa7, 0x8a, 0x76, 0x75, 0x6c, 0x5a];
+        data.extend(vec![0u8; 200]);
+        let err = decode_surfaces(&data).unwrap_err();
+        assert!(err.contains("vulZ"), "error was: {err}");
+        assert!(err.contains("not yet supported"), "error was: {err}");
     }
 
     #[test]

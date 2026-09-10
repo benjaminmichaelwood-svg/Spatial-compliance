@@ -26,6 +26,16 @@ const VERTEX_START = 0x78;
 const BYTES_PER_VERTEX = 24;
 const BYTES_PER_TRIANGLE = 24;
 
+// A compressed "vulZ" .00t variant exists (see CLAUDE.md's format spec) but
+// is NOT yet supported — its compression scheme and post-magic-bytes header
+// layout are undocumented and no sample file is available to validate a
+// parser against (see Master Priority 17 in CLAUDE.md for the full writeup
+// of why this was not implemented). Detecting the magic bytes here costs
+// nothing (already reading this file's first 128 bytes) and turns what
+// would otherwise be a confusing "not a valid .00t file" or truncation
+// error into an honest, specific one.
+const VULZ_MAGIC = [0xea, 0xfb, 0xa7, 0x8a, 0x76, 0x75, 0x6c, 0x5a];
+
 // CLAUDE.md documents 250MB as the target ceiling for a single surface.
 // Sites do occasionally run larger, so this WARNS rather than blocks — see
 // the task's own instruction to flag rather than hard-cap since the exact
@@ -67,6 +77,19 @@ async function validateOot(file: File): Promise<FileValidationResult> {
 
   const headerBytes = await file.slice(0, HEADER_SIZE).arrayBuffer();
   const view = new DataView(headerBytes);
+  const bytes = new Uint8Array(headerBytes);
+
+  if (VULZ_MAGIC.every((b, i) => bytes[i] === b)) {
+    return {
+      ok: false,
+      error: {
+        title: 'This file uses compressed vulZ format',
+        message: `${file.name} is a compressed "vulZ" Vulcan triangulation, which this tool doesn't support yet. In Vulcan, re-export or re-save it as an uncompressed .00t file, then upload that instead.`,
+        raw: 'vulZ magic bytes detected (ea fb a7 8a 76 75 6c 5a)',
+      },
+    };
+  }
+
   const vertexCount = readU32BE(view, VERTEX_COUNT_OFFSET);
   const triangleCount = readU32BE(view, TRIANGLE_COUNT_OFFSET);
 
