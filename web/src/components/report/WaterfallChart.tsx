@@ -39,11 +39,25 @@ interface WaterfallItem {
   pct: string;
 }
 
+// Step signs and the "planned"/"actual" starting points below must mirror
+// classify.rs's ConformanceSummary exactly (planned_domains / actual_domains
+// in classify_conformance), which is the same authoritative total shown in
+// the live sidebar summary (LayerPanel.tsx's Planned/Actual/Conformance %,
+// backed by result.summary.total_planned_volume/total_actual_volume) and in
+// the PPTX donut gauges (pptxReport.ts). Diverging from it here is exactly
+// how the waterfall's final bar used to disagree with those other totals.
+//
+//   total_planned_volume = PlannedAndMined + PlannedNotMined + MinedBeforeStart
+//   total_actual_volume  = PlannedAndMined + MinedNotPlanned + PrescheduleDelay + AheadOfPlan
+//
+// MinedBeforeStart counts toward the PLANNED baseline (progress already made
+// before the period started), not toward actual/production — it must be
+// subtracted on the way from "Planned" to "Production", not added.
 function getWaterfallSteps(mode: Mode): { key: string; label: string; sign: -1 | 1 }[] {
   if (mode === 'dig') {
     return [
       { key: 'PlannedNotMined', label: 'Planned Not Mined', sign: -1 },
-      { key: 'MinedBeforeStart', label: 'Mined Before Start', sign: 1 },
+      { key: 'MinedBeforeStart', label: 'Mined Before Start', sign: -1 },
       { key: 'MinedNotPlanned', label: 'Mined Not Planned', sign: 1 },
       { key: 'PrescheduleDelay', label: 'Preschedule Delay', sign: 1 },
       { key: 'AheadOfPlan', label: 'Ahead of Plan', sign: 1 },
@@ -51,7 +65,7 @@ function getWaterfallSteps(mode: Mode): { key: string; label: string; sign: -1 |
   }
   return [
     { key: 'PlannedNotDumped', label: 'Planned Not Dumped', sign: -1 },
-    { key: 'DumpedBeforeStart', label: 'Dumped Before Start', sign: 1 },
+    { key: 'DumpedBeforeStart', label: 'Dumped Before Start', sign: -1 },
     { key: 'DumpedNotPlanned', label: 'Dumped Not Planned', sign: 1 },
     { key: 'DumpPrescheduleDelay', label: 'Preschedule Delay', sign: 1 },
     { key: 'DumpedAheadOfPlan', label: 'Ahead of Plan', sign: 1 },
@@ -70,15 +84,23 @@ function buildWaterfallData(
   const conformKey = mode === 'dig' ? 'PlannedAndMined' : 'PlannedAndDumped';
   const pnmKey = mode === 'dig' ? 'PlannedNotMined' : 'PlannedNotDumped';
   const mnpKey = mode === 'dig' ? 'MinedNotPlanned' : 'DumpedNotPlanned';
+  const mbsKey = mode === 'dig' ? 'MinedBeforeStart' : 'DumpedBeforeStart';
+  const psdKey = mode === 'dig' ? 'PrescheduleDelay' : 'DumpPrescheduleDelay';
+  const aopKey = mode === 'dig' ? 'AheadOfPlan' : 'DumpedAheadOfPlan';
 
   const conformVol = volumeByDomain.get(conformKey) ?? 0;
   const pnmVol = volumeByDomain.get(pnmKey) ?? 0;
   const mnpVol = volumeByDomain.get(mnpKey) ?? 0;
-  const planned = conformVol + pnmVol;
+  const mbsVol = volumeByDomain.get(mbsKey) ?? 0;
+  const psdVol = volumeByDomain.get(psdKey) ?? 0;
+  const aopVol = volumeByDomain.get(aopKey) ?? 0;
+  // Matches classify.rs's total_planned_volume exactly (see comment above
+  // getWaterfallSteps): PlannedAndMined + PlannedNotMined + MinedBeforeStart.
+  const planned = conformVol + pnmVol + mbsVol;
 
   const hasSchedule = planned > 0.01 || conformVol > 0.01;
-  const hasProduction = conformVol > 0.01 || mnpVol > 0.01 ||
-    (volumeByDomain.get(mode === 'dig' ? 'MinedBeforeStart' : 'DumpedBeforeStart') ?? 0) > 0.01;
+  const hasProduction =
+    conformVol > 0.01 || mnpVol > 0.01 || mbsVol > 0.01 || psdVol > 0.01 || aopVol > 0.01;
 
   const items: WaterfallItem[] = [];
 

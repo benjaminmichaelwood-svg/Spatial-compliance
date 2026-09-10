@@ -371,20 +371,34 @@ export function buildSlides(
     viewerScreenshot: null,
   });
 
+  // Domain sets must match classify.rs's ConformanceSummary exactly
+  // (planned_domains / actual_domains in classify_conformance) — that Rust
+  // formula is what result.summary.total_planned_volume/total_actual_volume
+  // (used for the site-wide slides below, and for the live sidebar summary
+  // in LayerPanel.tsx) already reflect. Per-pit figures need the same
+  // domain sets or they silently disagree with those other totals.
   const conformKey = mode === 'dig' ? 'PlannedAndMined' : 'PlannedAndDumped';
   const pnmKey = mode === 'dig' ? 'PlannedNotMined' : 'PlannedNotDumped';
   const mnpKey = mode === 'dig' ? 'MinedNotPlanned' : 'DumpedNotPlanned';
+  const mbsKey = mode === 'dig' ? 'MinedBeforeStart' : 'DumpedBeforeStart';
+  const psdKey = mode === 'dig' ? 'PrescheduleDelay' : 'DumpPrescheduleDelay';
+  const aopKey = mode === 'dig' ? 'AheadOfPlan' : 'DumpedAheadOfPlan';
 
   for (let i = 0; i < boundaries.length; i++) {
     const b = boundaries[i];
     const pitDomains = result.domains.filter(d => d.block_name === b.name);
     if (pitDomains.length === 0) continue;
 
-    const confVol = pitDomains.filter(d => d.domain === conformKey).reduce((s, d) => s + d.volume, 0);
-    const pnmVol = pitDomains.filter(d => d.domain === pnmKey).reduce((s, d) => s + d.volume, 0);
-    const mnpVol = pitDomains.filter(d => d.domain === mnpKey).reduce((s, d) => s + d.volume, 0);
-    const planned = confVol + pnmVol;
-    const actual = confVol + mnpVol;
+    const sumOf = (key: string) =>
+      pitDomains.filter(d => d.domain === key).reduce((s, d) => s + d.volume, 0);
+    const confVol = sumOf(conformKey);
+    const pnmVol = sumOf(pnmKey);
+    const mnpVol = sumOf(mnpKey);
+    const mbsVol = sumOf(mbsKey);
+    const psdVol = sumOf(psdKey);
+    const aopVol = sumOf(aopKey);
+    const planned = confVol + pnmVol + mbsVol;
+    const actual = confVol + mnpVol + psdVol + aopVol;
     const confPct = planned > 0 ? (confVol / planned) * 100 : 0;
     const prodPct = planned > 0 ? (actual / planned) * 100 : 0;
 
