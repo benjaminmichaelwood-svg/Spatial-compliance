@@ -34,7 +34,10 @@ export interface SlideData {
   // split across separate slides. Site-summary slides are explicitly left
   // as the existing two-slide ('summary-viewer' + 'summary-waterfall')
   // pattern for now, per this item's own scope.
-  type: 'definitions' | 'pit-report' | 'summary-viewer' | 'summary-waterfall';
+  // Priority R6: 'divider' is a plain, template-styled title-only slide —
+  // see buildSlides for why only one is ever inserted (no grouping
+  // structure exists for boundaries/pits to divide by more finely).
+  type: 'definitions' | 'divider' | 'pit-report' | 'summary-viewer' | 'summary-waterfall';
   title: string;
   subtitle: string;
   pitName?: string;
@@ -519,6 +522,31 @@ async function addPitReportSlide(
   return slide;
 }
 
+// Priority R6: a plain, template-styled title-only divider slide. Confirmed
+// before implementing (grepped types.ts/BoundaryPanel.tsx/App.tsx) that
+// BoundaryRegion is a flat `{name, polygon}[]` with no grouping/category
+// field anywhere, and nothing else in the app groups boundaries/pits either
+// — so there is no natural structure to divide the pit slides *by*.
+// Per the task's own explicit fallback for exactly this case ("implement a
+// minimal fallback... rather than guessing"), buildSlides inserts exactly
+// one divider ahead of the whole undifferentiated block of pit-report
+// slides, not one per invented sub-group.
+function addDividerSlide(
+  pptx: PptxGenJS,
+  title: string,
+  templateLayout?: string,
+) {
+  const opts: any = templateLayout ? { masterName: templateLayout } : {};
+  const slide = pptx.addSlide(opts);
+
+  slide.addText(title, {
+    x: 0.5, y: 3.0, w: 12.33, h: 1.5,
+    fontSize: 32, bold: true, color: '1a1a19', align: 'center', valign: 'middle',
+  });
+
+  return slide;
+}
+
 export function buildSlides(
   result: { domains: DomainSolid[]; summary: any },
   mode: Mode,
@@ -528,8 +556,8 @@ export function buildSlides(
   pitScreenshots: Map<string, string>,
   // Priority R3: per-pit cross-section images, keyed by boundary name —
   // populated by ReportPanel.tsx only for pits with a saved cross-section
-  // (Priority R2); a pit with no entry gets addCrossSectionSlide's
-  // graceful placeholder instead of being skipped or left blank.
+  // (Priority R2); a pit with no entry gets addPitReportSlide's graceful
+  // placeholder instead of being skipped or left blank.
   pitCrossSectionImages: Map<string, string>,
 ): SlideData[] {
   const slides: SlideData[] = [];
@@ -563,6 +591,13 @@ export function buildSlides(
   const psdKey = mode === 'dig' ? 'PrescheduleDelay' : 'DumpPrescheduleDelay';
   const aopKey = mode === 'dig' ? 'AheadOfPlan' : 'DumpedAheadOfPlan';
 
+  // Priority R6: pit-report slides are collected separately and only
+  // spliced in (behind one divider) once we know at least one will
+  // actually exist — a boundary with no matching domains (pitDomains
+  // empty, see the `continue` below) produces no slide at all, and a
+  // divider with nothing after it would be worse than no divider.
+  const pitSlides: SlideData[] = [];
+
   for (let i = 0; i < boundaries.length; i++) {
     const b = boundaries[i];
     const pitDomains = result.domains.filter(d => d.block_name === b.name);
@@ -587,7 +622,7 @@ export function buildSlides(
     // Per-domain volume/percentage values are exactly what they always
     // were (confPct/prodPct/planned/actual computed above, untouched by
     // this item).
-    slides.push({
+    pitSlides.push({
       id: `pit-report-${i}`,
       type: 'pit-report',
       title: b.name,
@@ -607,6 +642,29 @@ export function buildSlides(
       // are built from, not a re-derivation.
       domainVolumes: { confVol, pnmVol, mbsVol, mnpVol, psdVol, aopVol, planned, actual },
     });
+  }
+
+  // Priority R6: exactly one divider ahead of the whole block of pit
+  // slides, only when there's at least one to divide from what comes
+  // before it (Definitions) — see this function's own comment above
+  // pitSlides for why a boundary can legitimately produce zero slides.
+  if (pitSlides.length > 0) {
+    slides.push({
+      id: 'divider-pit-reports',
+      type: 'divider',
+      title: 'Pit Reports',
+      subtitle: '',
+      domains: [],
+      mode,
+      conformancePct: 0,
+      productionPct: 0,
+      plannedVol: 0,
+      actualVol: 0,
+      viewerScreenshot: null,
+      crossSectionImage: null,
+      domainVolumes: null,
+    });
+    slides.push(...pitSlides);
   }
 
   const allPlanned = result.summary.total_planned_volume;
@@ -693,6 +751,8 @@ export async function generatePPTX(
   for (const data of slides) {
     if (data.type === 'definitions') {
       await addDefinitionsSlide(pptx, data.mode, data.subtitle, templateLayout);
+    } else if (data.type === 'divider') {
+      addDividerSlide(pptx, data.title, templateLayout);
     } else if (data.type === 'pit-report') {
       await addPitReportSlide(pptx, data, templateLayout, templateTheme);
     } else if (data.type === 'summary-viewer') {

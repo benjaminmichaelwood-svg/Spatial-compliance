@@ -232,6 +232,16 @@ function PitReportSlideContent({ slide, templateTheme }: { slide: SlideData; tem
   );
 }
 
+// Priority R6: plain, title-only divider slide — live-preview equivalent
+// of addDividerSlide in pptxReport.tsx.
+function DividerSlideContent({ slide }: { slide: SlideData }) {
+  return (
+    <div className="flex h-full w-full items-center justify-center p-4">
+      <h2 className="text-3xl font-bold text-slate-800">{slide.title}</h2>
+    </div>
+  );
+}
+
 function DefinitionsSlideContent({ slide }: { slide: SlideData }) {
   const defs = getDomainDefs(slide.mode);
   return (
@@ -322,11 +332,13 @@ export default function SlidePreview({ slides, onReorder, onRemove, templateThem
           {activeSlide && (
             activeSlide.type === 'definitions'
               ? <DefinitionsSlideContent slide={activeSlide} />
-              : activeSlide.type === 'pit-report'
-                ? <PitReportSlideContent slide={activeSlide} templateTheme={templateTheme} />
-                : activeSlide.type === 'summary-viewer'
-                  ? <ViewerSlideContent slide={activeSlide} templateTheme={templateTheme} />
-                  : <WaterfallSlideContent slide={activeSlide} />
+              : activeSlide.type === 'divider'
+                ? <DividerSlideContent slide={activeSlide} />
+                : activeSlide.type === 'pit-report'
+                  ? <PitReportSlideContent slide={activeSlide} templateTheme={templateTheme} />
+                  : activeSlide.type === 'summary-viewer'
+                    ? <ViewerSlideContent slide={activeSlide} templateTheme={templateTheme} />
+                    : <WaterfallSlideContent slide={activeSlide} />
           )}
         </div>
 
@@ -381,11 +393,13 @@ export default function SlidePreview({ slides, onReorder, onRemove, templateThem
                 <span className="text-[7px] text-slate-400">
                   {slide.type === 'definitions'
                     ? 'Definitions'
-                    : slide.type === 'pit-report'
-                      ? 'Pit Report'
-                      : slide.type === 'summary-viewer'
-                        ? '3D View'
-                        : 'Waterfall'}
+                    : slide.type === 'divider'
+                      ? 'Divider'
+                      : slide.type === 'pit-report'
+                        ? 'Pit Report'
+                        : slide.type === 'summary-viewer'
+                          ? '3D View'
+                          : 'Waterfall'}
                 </span>
               </button>
 
