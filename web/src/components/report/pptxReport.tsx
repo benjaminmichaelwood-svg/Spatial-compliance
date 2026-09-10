@@ -1,8 +1,10 @@
 import PptxGenJS from 'pptxgenjs';
 import type { DomainSolid, BlockSummary, Mode, BoundaryRegion } from '../../types';
-import { buildWaterfallData } from './WaterfallChart';
-import { getColumns, getDomainDefs } from './definitionsData';
+import WaterfallChart from './WaterfallChart';
+import DefinitionsSchematic from './DefinitionsSchematic';
+import { getDomainDefs } from './definitionsData';
 import type { TemplateTheme } from './templateTheme';
+import { renderComponentToImage } from './renderComponentToImage';
 
 export interface SlideData {
   id: string;
@@ -30,21 +32,6 @@ function statusColor(pct: number): string {
   if (pct >= 60) return 'fab219';
   return 'd03b3b';
 }
-
-const CHART_COLORS: Record<string, string> = {
-  PlannedAndMined: '2a78d6',
-  PlannedNotMined: 'eda100',
-  MinedNotPlanned: 'e34948',
-  MinedBeforeStart: '4a3aa7',
-  PrescheduleDelay: 'eb6834',
-  AheadOfPlan: '1baf7a',
-  PlannedAndDumped: '2a78d6',
-  PlannedNotDumped: 'eda100',
-  DumpedNotPlanned: 'e34948',
-  DumpedBeforeStart: '4a3aa7',
-  DumpPrescheduleDelay: 'eb6834',
-  DumpedAheadOfPlan: '1baf7a',
-};
 
 function addDonutToSlide(
   slide: PptxGenJS.Slide,
@@ -92,59 +79,58 @@ function addDonutToSlide(
   });
 }
 
-function addWaterfallToSlide(
+// Waterfall slide box (unchanged from before this Priority R1 rewrite):
+// x: 0.4, y: 0.8, w: 9.2, h: 4.3. WaterfallChart.tsx's own chart height is
+// fixed at 320px (its `<ResponsiveContainer height={320}>`), so the
+// off-screen render width is chosen to make the rendered aspect ratio
+// (renderWidth / 320) match this box's aspect ratio (9.2 / 4.3) exactly —
+// that way the captured image fills the box with no stretching or
+// letterboxing, without needing a separate generic fit-within-box helper.
+const WATERFALL_X = 0.4;
+const WATERFALL_Y = 0.8;
+const WATERFALL_W = 9.2;
+const WATERFALL_H = 4.3;
+const WATERFALL_RENDER_W = Math.round(320 * (WATERFALL_W / WATERFALL_H));
+
+// Priority R1: renders the real WaterfallChart.tsx component (the same one
+// SlidePreview.tsx already shows in the live preview) to an image and
+// embeds it, instead of the old second, independent implementation using
+// PptxGenJS's native bar chart plus manually-positioned overlay rectangles
+// (removed — it duplicated buildWaterfallData's bar-position math by hand
+// instead of just capturing what the real chart draws, which is exactly
+// the class of bug that caused the original waterfall-totals mismatch —
+// see CLAUDE.md's Priority 4).
+async function addWaterfallImageToSlide(
   slide: PptxGenJS.Slide,
   domains: DomainSolid[],
   mode: Mode,
 ) {
-  const items = buildWaterfallData(domains, mode);
-  const maxVal = Math.max(...items.map(d => d.base + d.value)) * 1.15;
-
-  const labels = items.map(d => d.name);
-  const bases = items.map(d => d.base);
-  const values = items.map(d => d.value);
-  const colors = items.map(d => d.color.replace('#', ''));
-
-  slide.addChart('bar' as any, [
-    { name: 'Base', labels, values: bases },
-    { name: 'Value', labels, values },
-  ], {
-    x: 0.4, y: 0.8, w: 9.2, h: 4.3,
-    barDir: 'col',
-    barGrouping: 'stacked',
-    showLegend: false,
-    showTitle: false,
-    showValue: false,
-    catAxisOrientation: 'minMax',
-    valAxisOrientation: 'minMax',
-    valAxisMaxVal: maxVal,
-    valAxisNumFmt: '#,##0',
-    catAxisLabelFontSize: 8,
-    valAxisLabelFontSize: 8,
-    catAxisLabelColor: '898781',
-    valAxisLabelColor: '898781',
-    chartColors: ['FFFFFF', '52514E'],
-    chartColorsOpacity: 0,
-  } as any);
-
-  const barWidth = 9.2 / items.length;
-  items.forEach((item, i) => {
-    if (item.color === '#52514e' || item.color === CHART_COLORS[item.name]) return;
-    const cx = 0.4 + (i + 0.5) * barWidth;
-    const barH = (item.value / maxVal) * 4.3;
-    const barY = 0.8 + 4.3 - ((item.base + item.value) / maxVal) * 4.3;
-    slide.addShape('rect' as any, {
-      x: cx - barWidth * 0.3,
-      y: barY,
-      w: barWidth * 0.6,
-      h: Math.max(barH, 0.05),
-      fill: { color: item.color.replace('#', '') },
-      line: { color: item.color.replace('#', ''), width: 0 },
-    } as any);
-  });
+  const { dataUrl } = await renderComponentToImage(
+    <WaterfallChart domains={domains} mode={mode} />,
+    WATERFALL_RENDER_W,
+  );
+  slide.addImage({ data: dataUrl, x: WATERFALL_X, y: WATERFALL_Y, w: WATERFALL_W, h: WATERFALL_H });
 }
 
-function addDefinitionsSlide(
+// The diagram's own vertical footprint on the slide (unchanged from the
+// old hand-drawn version's topY..topY+colH band, so the table below still
+// starts exactly where it always has). DefinitionsSchematic.tsx is
+// rendered at its native viewBox size (660x230 — see DIAGRAM_RENDER_W's
+// comment) and then placed here preserving that aspect ratio, centered
+// horizontally, rather than stretched to a fixed box.
+const DIAGRAM_Y = 0.85;
+const DIAGRAM_H = 2.8;
+// DefinitionsSchematic's <svg viewBox="0 0 660 230"> has an inline
+// `style={{ maxHeight: 230 }}` — rendering it at any CSS width above 660px
+// would make its natural (aspect-correct) height exceed that cap, at which
+// point the max-height clamp and the width:100% rule fight each other in a
+// way that's not worth relying on. Rendering at exactly its native 660px
+// width keeps the natural height at exactly 230px (right at, not over,
+// the cap), sidestepping that entirely; renderComponentToImage's `scale`
+// parameter (default 3x) still gives a crisp 1980x690 rasterization.
+const DIAGRAM_RENDER_W = 660;
+
+async function addDefinitionsSlide(
   pptx: PptxGenJS,
   mode: Mode,
   subtitle: string,
@@ -162,81 +148,18 @@ function addDefinitionsSlide(
     fontSize: 10, color: '898781',
   });
 
-  const [leftCol, rightCol] = getColumns(mode);
-
-  const colW = 3.2;
-  const colH = 2.8;
-  const leftX = 1.8;
-  const rightX = 7.3;
-  const topY = 0.85;
-  const bandH = colH / 4;
-
-  function drawColumn(col: typeof leftCol, cx: number) {
-    slide.addText(col.title, {
-      x: cx, y: topY - 0.22, w: colW, h: 0.2,
-      fontSize: 9, bold: true, color: '444444', align: 'center',
-    });
-
-    for (let i = 0; i < col.bands.length; i++) {
-      const band = col.bands[i];
-      const by = topY + i * bandH;
-      slide.addShape('rect' as any, {
-        x: cx, y: by, w: colW, h: bandH,
-        fill: { color: band.color.replace('#', '') },
-        line: { color: '555555', width: 0.5 },
-      } as any);
-      if (band.label) {
-        slide.addText(band.label, {
-          x: cx, y: by, w: colW, h: bandH,
-          fontSize: 8, bold: true, color: 'FFFFFF',
-          align: 'center', valign: 'middle',
-        });
-      }
-    }
-
-    slide.addShape('rect' as any, {
-      x: cx, y: topY, w: colW, h: colH,
-      fill: { type: 'none' as any },
-      line: { color: '444444', width: 1 },
-    } as any);
-
-    const labels = col.leftLabels.length > 0 ? col.leftLabels : col.rightLabels;
-    const isLeft = col.leftLabels.length > 0;
-
-    for (const sl of labels) {
-      const fraction = (sl.y - 34) / 180;
-      const ly = topY + fraction * colH;
-      if (isLeft) {
-        slide.addText(`${sl.label}  ${sl.fullName}`, {
-          x: cx - 2.0, y: ly - 0.1, w: 1.9, h: 0.2,
-          fontSize: 7, color: '555555', align: 'right', bold: false,
-        });
-        slide.addShape('line' as any, {
-          x: cx - 0.05, y: ly, w: 0.1, h: 0,
-          line: { color: '888888', width: 0.5 },
-        } as any);
-      } else {
-        slide.addText(`${sl.label}  ${sl.fullName}`, {
-          x: cx + colW + 0.1, y: ly - 0.1, w: 1.9, h: 0.2,
-          fontSize: 7, color: '555555', align: 'left', bold: false,
-        });
-        slide.addShape('line' as any, {
-          x: cx + colW - 0.05, y: ly, w: 0.1, h: 0,
-          line: { color: '888888', width: 0.5 },
-        } as any);
-      }
-    }
-  }
-
-  drawColumn(leftCol, leftX);
-  drawColumn(rightCol, rightX);
-
-  const depthLabel = mode === 'dig' ? 'Increasing Depth  ↓' : 'Increasing Height  ↑';
-  slide.addText(depthLabel, {
-    x: 0.3, y: topY + colH / 2 - 0.15, w: 1.2, h: 0.3,
-    fontSize: 7, color: 'AAAAAA', align: 'center',
-    rotate: mode === 'dig' ? 0 : 0,
-  });
+  // Priority R1: renders the real DefinitionsSchematic.tsx component (the
+  // same one SlidePreview.tsx already shows in the live preview) instead of
+  // the old hand-drawn column diagram (removed — it computed label
+  // positions from magic-number fractions of the column height by hand, a
+  // second independent implementation of the same visual).
+  const { dataUrl, width, height } = await renderComponentToImage(
+    <DefinitionsSchematic mode={mode} />,
+    DIAGRAM_RENDER_W,
+  );
+  const diagramW = DIAGRAM_H * (width / height);
+  const diagramX = (13.33 - diagramW) / 2;
+  slide.addImage({ data: dataUrl, x: diagramX, y: DIAGRAM_Y, w: diagramW, h: DIAGRAM_H });
 
   const defs = getDomainDefs(mode);
   const tableRows: any[][] = [
@@ -327,7 +250,7 @@ function addViewerSlide(
   return slide;
 }
 
-function addWaterfallSlide(
+async function addWaterfallSlide(
   pptx: PptxGenJS,
   data: SlideData,
   templateLayout?: string,
@@ -344,7 +267,7 @@ function addWaterfallSlide(
     fontSize: 10, color: '898781',
   });
 
-  addWaterfallToSlide(slide, data.domains, data.mode);
+  await addWaterfallImageToSlide(slide, data.domains, data.mode);
 
   return slide;
 }
@@ -514,11 +437,11 @@ export async function generatePPTX(
 
   for (const data of slides) {
     if (data.type === 'definitions') {
-      addDefinitionsSlide(pptx, data.mode, data.subtitle, templateLayout);
+      await addDefinitionsSlide(pptx, data.mode, data.subtitle, templateLayout);
     } else if (data.type === 'pit-viewer' || data.type === 'summary-viewer') {
       addViewerSlide(pptx, data, templateLayout, templateTheme);
     } else {
-      addWaterfallSlide(pptx, data, templateLayout);
+      await addWaterfallSlide(pptx, data, templateLayout);
     }
   }
 
