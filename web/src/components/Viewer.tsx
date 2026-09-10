@@ -18,6 +18,7 @@ import { SURFACE_ROLES } from '../types';
 import type { FlatDomainSolid } from '../workers/engineClient';
 import PerformanceOverlay from './PerformanceOverlay';
 import ThicknessLegend, { sampleHeatmapRamp } from './ThicknessLegend';
+import { decimateGeometry } from '../utils/decimation';
 
 (THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
 (THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
@@ -90,6 +91,69 @@ const BG_COLORS: Record<ViewerBackground, string> = {
 const EDGE_COLOR_DARK = 0x222222;
 const EDGE_COLOR_LIGHT = 0x666666;
 const CREASE_THRESHOLD_DEG = 18;
+
+// --- LOD (level-of-detail) ---------------------------------------------
+// decimateGeometry() (web/src/utils/decimation.ts) existed but was never
+// called anywhere — every surface/domain solid always rendered at full
+// resolution regardless of camera distance or movement, which is the
+// leading suspect for "rendering is too slow" on large (300K+ triangle)
+// meshes per CLAUDE.md. This wires it in.
+//
+// Ratios and thresholds:
+//   LOD 0 = full resolution, LOD 1 = 25% of triangles, LOD 2 = 5%.
+//   Distance thresholds are RELATIVE to each mesh's own bounding-sphere
+//   radius (not a fixed meter value) so the same logic scales correctly
+//   from a small test surface up to a 20km site: full detail within 1.5x
+//   the mesh's radius, 25% within 4x, 5% beyond that.
+//   While the camera is actively moving (checked by comparing its position
+//   between throttled checks), the effective level is floored at 1 (25%)
+//   even if the camera happens to be close — this is what keeps orbit/pan/
+//   zoom responsive; it upgrades back to full detail once movement stops.
+const LOD_RATIOS = [1, 0.25, 0.05] as const;
+const LOD_NEAR_MULTIPLE = 1.5;
+const LOD_FAR_MULTIPLE = 4;
+const LOD_CHECK_INTERVAL_MS = 150; // throttle: don't recompute the LOD decision every frame
+const LOD_MOVING_HOLD_MS = 400; // stay in "moving" LOD for this long after the last detected camera movement
+
+/**
+ * Decides which precomputed LOD level (0/1/2) a mesh should render at,
+ * based on camera distance to its bounding sphere (relative to the
+ * sphere's own radius) and whether the camera is currently moving.
+ * Runs its actual distance check on a throttled interval inside useFrame,
+ * not every frame, and only triggers a re-render (via setState) when the
+ * chosen level actually changes.
+ */
+function useLodLevel(sphere: THREE.Sphere | null): number {
+  const { camera } = useThree();
+  const [level, setLevel] = useState(0);
+  const lastCheckMs = useRef(0);
+  const lastCamPos = useRef<THREE.Vector3 | null>(null);
+  const movingUntilMs = useRef(0);
+
+  useFrame((state) => {
+    if (!sphere) return;
+    const nowMs = state.clock.elapsedTime * 1000;
+    if (nowMs - lastCheckMs.current < LOD_CHECK_INTERVAL_MS) return;
+    lastCheckMs.current = nowMs;
+
+    const radius = Math.max(sphere.radius, 1);
+    if (!lastCamPos.current) lastCamPos.current = camera.position.clone();
+    const moved = camera.position.distanceTo(lastCamPos.current) > radius * 0.001;
+    lastCamPos.current.copy(camera.position);
+    if (moved) movingUntilMs.current = nowMs + LOD_MOVING_HOLD_MS;
+    const isMoving = nowMs < movingUntilMs.current;
+
+    const dist = camera.position.distanceTo(sphere.center);
+    let distanceLevel = 0;
+    if (dist > radius * LOD_FAR_MULTIPLE) distanceLevel = 2;
+    else if (dist > radius * LOD_NEAR_MULTIPLE) distanceLevel = 1;
+    const effective = isMoving ? Math.max(distanceLevel, 1) : distanceLevel;
+
+    setLevel((prev) => (prev === effective ? prev : effective));
+  });
+
+  return level;
+}
 
 function computeSmoothNormals(positions: Float32Array): Float32Array {
   const normals = new Float32Array(positions.length);
@@ -184,15 +248,36 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
   const meshRef = useRef<THREE.Mesh>(null);
   const matRef = useRef<THREE.MeshPhongMaterial>(null);
 
-  const { geometry, triCount } = useMemo(() => {
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(upload.positions, 3));
-    geo.setIndex(new THREE.BufferAttribute(upload.indices, 1));
-    geo.computeVertexNormals();
-    geo.computeBoundingSphere();
-    (geo as any).boundsTree = new MeshBVH(geo);
-    return { geometry: geo, triCount: upload.triangleCount };
+  const { geometry, lodGeometries, triCount } = useMemo(() => {
+    const build = (positions: Float32Array, indices: Uint32Array) => {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geo.setIndex(new THREE.BufferAttribute(indices, 1));
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+      (geo as any).boundsTree = new MeshBVH(geo);
+      return geo;
+    };
+    // Precompute all LOD levels once here (on data load), not per camera
+    // check — decimation itself isn't free. LOD 0 is the same full-res
+    // geometry used everywhere else (raycasting, disposal, etc.).
+    const full = build(upload.positions, upload.indices);
+    const levels = LOD_RATIOS.map((ratio) => {
+      if (ratio === 1) return full;
+      const d = decimateGeometry(upload.positions, upload.indices, ratio);
+      return build(d.positions, d.indices);
+    });
+    return { geometry: full, lodGeometries: levels, triCount: upload.triangleCount };
   }, [upload]);
+
+  useEffect(() => {
+    return () => {
+      for (const g of lodGeometries) {
+        (g as any).boundsTree?.dispose?.();
+        g.dispose();
+      }
+    };
+  }, [lodGeometries]);
 
   const isHeatmapActive = !!(heatmapMode && heatmapVertexThickness && heatmapMode.paintRole === upload.role);
 
@@ -238,7 +323,14 @@ function SurfaceMesh({ upload, style, selected, highlighted, onHover, onSelect, 
   }, [heatmapGeo, heatmapVertexThickness, heatmapMode, style.color]);
 
   const isPainted = isHeatmapActive;
-  const activeGeo = isHeatmapActive ? (heatmapGeo ?? geometry) : geometry;
+  // LOD is bypassed while the thickness heatmap is painted: per-vertex
+  // heatmap colors are computed against the full-resolution vertex layout
+  // (heatmapGeo is a clone of `geometry`, LOD 0), and re-deriving that
+  // per-vertex coloring for each decimated LOD level's different vertex
+  // layout is out of scope here — heatmap review is a deliberate,
+  // stationary precision check anyway, not a casual navigation view.
+  const lodLevel = useLodLevel(geometry.boundingSphere);
+  const activeGeo = isHeatmapActive ? (heatmapGeo ?? geometry) : lodGeometries[lodLevel];
 
   useEffect(() => {
     if (!matRef.current) return;
@@ -498,11 +590,25 @@ const CREASE_FRAGMENT_SHADER = /* glsl */ `
 `;
 
 function CreaseEdges({ geometry, visible, isDark }: { geometry: THREE.BufferGeometry; visible: boolean; isDark: boolean }) {
-  const creaseGeo = useMemo(() => buildCreaseGeometry(geometry, CREASE_THRESHOLD_DEG), [geometry]);
-
+  // `geometry` can flip between LOD levels as the camera moves. A plain
+  // useMemo([geometry]) only remembers the single most-recently-seen
+  // geometry, so switching back and forth between two LOD levels would
+  // rebuild the crease overlay every single time. Cache per geometry
+  // identity instead, so each LOD level's crease geometry is computed at
+  // most once (lazily, the first time that level is actually reached).
+  const cacheRef = useRef(new Map<THREE.BufferGeometry, THREE.BufferGeometry>());
   useEffect(() => {
-    return () => creaseGeo.dispose();
-  }, [creaseGeo]);
+    const cache = cacheRef.current;
+    return () => {
+      for (const g of cache.values()) g.dispose();
+      cache.clear();
+    };
+  }, []);
+  let creaseGeo = cacheRef.current.get(geometry);
+  if (!creaseGeo) {
+    creaseGeo = buildCreaseGeometry(geometry, CREASE_THRESHOLD_DEG);
+    cacheRef.current.set(geometry, creaseGeo);
+  }
 
   const material = useMemo(
     () =>
@@ -585,10 +691,37 @@ function BatchedDomainGroup({
   const meshRef = useRef<THREE.Mesh>(null);
   const matRef = useRef<THREE.MeshPhongMaterial>(null);
 
-  const { geo, triRanges, totalTris } = useMemo(() => {
-    const result = buildBatchedGeometry(solids);
-    return { geo: result.geometry, triRanges: result.triRanges, totalTris: result.totalTris };
+  const { lodResults, totalTris } = useMemo(() => {
+    // Decimate each solid individually, BEFORE batching them into one
+    // merged geometry — this is what keeps triRanges (used by findSolid()
+    // below for hover/click attribution) correct at every LOD level: each
+    // solid's own (now-reduced) triangleCount still marks out its own
+    // range in the merged buffer, it's just a smaller range.
+    const results = LOD_RATIOS.map((ratio) => {
+      const levelSolids =
+        ratio === 1
+          ? solids
+          : solids.map((s) => {
+              const d = decimateGeometry(s.positions, s.indices, ratio);
+              return { ...s, positions: d.positions, indices: d.indices, vertexCount: d.positions.length / 3, triangleCount: d.indices.length / 3 };
+            });
+      return buildBatchedGeometry(levelSolids);
+    });
+    return { lodResults: results, totalTris: results[0].totalTris };
   }, [solids]);
+
+  const geo = lodResults[0].geometry;
+  const lodLevel = useLodLevel(geo.boundingSphere);
+  const { geometry: activeGeo, triRanges } = lodResults[lodLevel];
+
+  useEffect(() => {
+    return () => {
+      for (const r of lodResults) {
+        (r.geometry as any).boundsTree?.dispose?.();
+        r.geometry.dispose();
+      }
+    };
+  }, [lodResults]);
 
   useEffect(() => {
     if (!matRef.current) return;
@@ -618,7 +751,7 @@ function BatchedDomainGroup({
     <group>
       <mesh
         ref={meshRef}
-        geometry={geo}
+        geometry={activeGeo}
         frustumCulled
         onPointerOver={(e) => {
           e.stopPropagation();
@@ -674,7 +807,7 @@ function BatchedDomainGroup({
           polygonOffsetUnits={1}
         />
       </mesh>
-      <CreaseEdges geometry={geo} visible={style.wireframe} isDark={isDark} />
+      <CreaseEdges geometry={activeGeo} visible={style.wireframe} isDark={isDark} />
     </group>
   );
 }
