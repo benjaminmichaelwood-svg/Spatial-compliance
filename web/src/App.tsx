@@ -46,6 +46,7 @@ import { parseArchd } from './utils/archdParser';
 import DomainLegend from './components/DomainLegend';
 import ErrorBanner from './components/ErrorBanner';
 import { classifyEmptyResult, type ClassifiedError } from './utils/errorClassification';
+import { validateSurfaceFile } from './utils/fileValidation';
 
 
 function makeSampleUpload(z: number, name: string, role: SurfaceRole, fileName: string, size = 20): UploadedSurface {
@@ -257,6 +258,19 @@ export default function App() {
   const handleFileSelected = useCallback(
     async (role: SurfaceRole, file: File) => {
       try {
+        // Fast pre-parse validation (extension, .00t header sanity, size)
+        // BEFORE committing to a full parse — a bad file should fail in
+        // well under a second, not after a long parse attempt on a 250MB
+        // upload. See fileValidation.ts.
+        const validation = await validateSurfaceFile(file);
+        if (!validation.ok) {
+          setError(validation.error);
+          return;
+        }
+        if (validation.warning) {
+          setError(validation.warning);
+        }
+
         setProgress({ phase: 'parsing', value: 0.1 });
 
         let upload: UploadedSurface;

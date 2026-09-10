@@ -41,9 +41,9 @@ Fully reverse-engineered and validated (zero delta across 68,259 vertices and 13
   - Offset 0x60: BE u32 = triangle_count
 - **Vertex data:** starts at offset 0x78
   - Each vertex = 24 bytes: 3 × big-endian f64 (Easting, Northing, RL)
-- **Triangle data:** starts immediately after vertices with 8-byte overlap
+- **Triangle data:** starts immediately after vertices, at offset `0x78 + vertex_count × 24`
   - Each triangle = 24 bytes: 3 × BE u32 (1-indexed vertex indices) + 12 bytes zero padding
-- **File size** = 128 + (vertex_count × 24 − 8) + (triangle_count × 24)
+- **File size** = 128 + (vertex_count × 24) + (triangle_count × 24) — corrected 2026-09 (Priority 10 session): the previous "− 8-byte overlap" text here didn't match `format::decode_surfaces`'s actual (empirically-validated) `expected_size` formula, which has no such subtraction. Found while writing frontend pre-parse validation against the real formula.
 - Note: a compressed "vulZ" format variant exists (magic: ea fb a7 8a 76 75 6c 5a) but is NOT yet supported
 
 ## Conformance Domains
@@ -293,6 +293,16 @@ Working through a 22-item prioritized action list (rendering/build/repo hygiene 
 - **Unrelated discovery, not fixed here:** while tracing the run-success path, found the actual root cause of Priority 5's flagged "domains hidden by default" issue — `handleRun`'s worker path explicitly calls `setVisible(new Set<string>())` after every run (the non-worker fallback path instead auto-populates from `res.domains`, but that path is effectively dead code since `useWorker` is the default). Left as a candidate for a future session since fixing it means changing post-run *behavior*, not just how errors are *displayed*.
 - **Visually and functionally verified** (dev server + Playwright + headless Chromium/SwiftShader): uploaded a corrupted `.00t` (all-zero bytes past the header) and confirmed — no native `alert()` fires; the classified banner appears with the correct plain-language title ("This file looks corrupt"); "Show details" reveals the exact raw message ("Vertex count is zero"); dismiss removes it cleanly. Screenshot sent to the user.
 - `npx tsc --noEmit` and `npx vite build` both pass cleanly.
+
+### Master Priority 10 — Validate files before attempting to parse them
+- **Confirmed the current supported list** rather than assuming: `handleFileSelected` only branches on `.json` vs. everything-else-treated-as-binary-.00t — there is no third format, and no extension check at all before this change (any file, `.pdf` included, would be handed straight to the binary `.00t` parser and fail deep inside it).
+- **New `web/src/utils/fileValidation.ts`** — `validateSurfaceFile(file)`, run at the very start of `handleFileSelected`, before any parsing begins:
+  - Extension check against the confirmed supported list (`.00t`, `.json`).
+  - For `.00t`: reads only the first 128 bytes (never the whole file) and checks — file is at least header-sized; `vertex_count`/`triangle_count` at their documented offsets are plausible (non-zero, under 200M — catches garbage bytes being misread as counts); and the declared counts' implied file size (`128 + vertex_count×24 + triangle_count×24`) doesn't exceed the actual `file.size` (catches truncated/corrupt downloads). This mirrors `format.rs::decode_surfaces`'s own validation exactly — **while writing it, found and fixed a real inaccuracy in this file's own "File size" formula** (the old text subtracted a nonexistent "8-byte overlap" that doesn't appear anywhere in the actual, empirically-validated Rust implementation — corrected above, in the Vulcan .00t Format Specification section).
+  - For `.json`: reads only the first 64 bytes and checks it starts with `{` or `[` — catches "obviously not JSON" (e.g. a renamed `.00t`) before spending time reading and decoding the whole file. `JSON.parse` itself remains the real validation for genuinely JSON-shaped garbage.
+  - File size: **warns rather than hard-blocks** beyond 500MB (2× the ~250MB target documented elsewhere in this file) — flagged as a judgment call since the exact ceiling may need tuning; the upload still proceeds automatically. Threshold lives in `SIZE_WARNING_BYTES`.
+  - All failures/warnings route through the same `ClassifiedError`/`ErrorBanner` UI from Priority 9 — no new UI pattern introduced.
+- **Verified fast and correct** (dev server + Playwright + headless Chromium/SwiftShader): tested a wrong-extension file, a truncated `.00t` (valid header, missing trailing bytes), a `.00t` with garbage/implausible header counts, and a genuinely valid small `.00t` — the three bad cases were each correctly rejected with the right classified message in ~300ms (test overhead, not validation cost — the actual check reads only the 128-byte header slice), and the valid file passed straight through with no error banner and successfully assigned to a role. Screenshot confirms the valid-file case.
 
 ## Conventions
 - Push completed work to main branch for deployment
