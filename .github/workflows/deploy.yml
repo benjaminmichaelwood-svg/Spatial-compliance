@@ -33,7 +33,7 @@ jobs:
         run: cargo test --lib
 
       - name: Build WASM
-        run: wasm-pack build --target web crates/spatial-engine
+        run: wasm-pack build --release --target web crates/spatial-engine
 
       - name: Copy WASM binary
         run: cp crates/spatial-engine/pkg/spatial_engine_bg.wasm web/public/spatial_engine_bg.wasm

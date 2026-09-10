@@ -197,6 +197,18 @@ Run `node scripts/visual-check.mjs` (requires `npm run dev` on localhost:5173 an
 - **Working tree:** Clean, nothing uncommitted
 - **67 Rust tests pass** (65 original + 2 new), 2 ignored (require local .00t files)
 
+## Session Log — 2026-09-10 (Master Action List, item 1 of 22)
+
+Working through a 22-item prioritized action list (rendering/build/repo hygiene + backend/usability/functionality) one item at a time on branch `claude/md-file-review-pf1dfr`.
+
+### Master Priority 1 — Ship a release-optimized WASM binary
+- **Change:** `.github/workflows/deploy.yml`'s "Build WASM" step now explicitly passes `--release`: `wasm-pack build --release --target web crates/spatial-engine`.
+- **Verified `[profile.release]` (opt-level = "s", lto = true) actually applies:** built the crate three ways with the wasm-pack version installed in this environment (0.13.x class) — explicit `--release`, explicit `--dev`, and no flag at all. Result: **no-flag and `--release` both produced an identical 349,621-byte optimized binary** ("Finished `release` profile [optimized]"); `--dev` produced a 1,097,504-byte unoptimized binary (3.1x larger, "unoptimized + debuginfo"). This confirms the installed wasm-pack already defaults to the release profile when no flag is given.
+- **Important finding:** the wasm binary already committed at `web/public/spatial_engine_bg.wasm` (349,621 bytes) is byte-for-byte identical to a fresh `--release` build except for 1 non-deterministic byte (a build-artifact hash/section that varies run-to-run even with zero source changes — confirmed via `git status` showing no drift in `crates/spatial-engine/src` before the rebuild). **The production binary currently served was already release-optimized.** This change makes that explicit and removes the ambiguity for future wasm-pack versions/environments rather than fixing an active mis-build — the risk the action list flagged was real in principle (wasm-pack's documented default has changed across versions) but was not actually manifesting in the current deployment.
+- **wasm binary size: before = 349,621 bytes, after = 349,621 bytes (no functional change).**
+- Did not change `opt-level`/`lto` values (out of scope per this item).
+- `cargo test --lib` on `crates/spatial-engine`: 67 passed, 2 ignored (unchanged from prior session).
+
 ## Conventions
 - Push completed work to main branch for deployment
 - Tests with #[ignore] for those requiring local .00t files
