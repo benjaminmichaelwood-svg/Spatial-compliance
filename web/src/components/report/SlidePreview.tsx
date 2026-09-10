@@ -1,5 +1,6 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback } from 'react';
 import type { SlideData } from './pptxReport';
+import type { TemplateTheme } from './templateTheme';
 import WaterfallChart from './WaterfallChart';
 import DonutGauge from './DonutGauge';
 import DefinitionsSchematic from './DefinitionsSchematic';
@@ -9,6 +10,8 @@ interface Props {
   slides: SlideData[];
   onReorder: (slides: SlideData[]) => void;
   onRemove: (id: string) => void;
+  /** Extracted from an uploaded PPTX template — see templateTheme.ts (Priority 20). Null when no template is uploaded (or it couldn't be read), in which case every slide renders exactly as it did before this feature existed. */
+  templateTheme?: TemplateTheme | null;
 }
 
 function formatVol(v: number): string {
@@ -17,10 +20,10 @@ function formatVol(v: number): string {
   return v.toFixed(1);
 }
 
-function ViewerSlideContent({ slide }: { slide: SlideData }) {
+function ViewerSlideContent({ slide, templateTheme }: { slide: SlideData; templateTheme?: TemplateTheme | null }) {
   return (
     <div className="flex h-full w-full gap-3 p-4">
-      <div className="flex-1 overflow-hidden rounded-lg bg-slate-100">
+      <div className="relative flex-1 overflow-hidden rounded-lg bg-slate-100">
         {slide.viewerScreenshot ? (
           <img
             src={slide.viewerScreenshot}
@@ -32,10 +35,22 @@ function ViewerSlideContent({ slide }: { slide: SlideData }) {
             3D Viewer Screenshot
           </div>
         )}
+        {templateTheme?.logoDataUrl && (
+          <img
+            src={templateTheme.logoDataUrl}
+            alt="Template logo"
+            className="absolute right-2 top-2 h-8 max-w-[35%] object-contain drop-shadow"
+          />
+        )}
       </div>
       <div className="flex w-44 flex-shrink-0 flex-col items-center gap-3">
         <DonutGauge value={slide.conformancePct} label="Conformance" mode="conformance" />
-        <DonutGauge value={slide.productionPct} label="Production" mode="production" />
+        <DonutGauge
+          value={slide.productionPct}
+          label="Production"
+          mode="production"
+          accentColor={templateTheme ? `#${templateTheme.accentColor}` : undefined}
+        />
         <div className="mt-auto grid w-full grid-cols-3 gap-1 text-center">
           <div>
             <div className="text-[9px] text-slate-400">Planned</div>
@@ -96,7 +111,7 @@ function DefinitionsSlideContent({ slide }: { slide: SlideData }) {
   );
 }
 
-export default function SlidePreview({ slides, onReorder, onRemove }: Props) {
+export default function SlidePreview({ slides, onReorder, onRemove, templateTheme }: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
 
   const clampedIndex = Math.min(activeIndex, Math.max(slides.length - 1, 0));
@@ -154,7 +169,7 @@ export default function SlidePreview({ slides, onReorder, onRemove }: Props) {
             activeSlide.type === 'definitions'
               ? <DefinitionsSlideContent slide={activeSlide} />
               : activeSlide.type === 'pit-viewer' || activeSlide.type === 'summary-viewer'
-                ? <ViewerSlideContent slide={activeSlide} />
+                ? <ViewerSlideContent slide={activeSlide} templateTheme={templateTheme} />
                 : <WaterfallSlideContent slide={activeSlide} />
           )}
         </div>

@@ -4,6 +4,15 @@ interface Props {
   value: number;
   label: string;
   mode?: 'conformance' | 'production';
+  /**
+   * Overrides the "production" gauge's fill color (default '#2a78d6') —
+   * used to reflect an uploaded PPTX template's accent color in Priority
+   * 20's live preview. Deliberately NOT applied to "conformance" mode,
+   * which is a red/amber/green status color tied to the value itself, not
+   * a brand color, and never applied to domain-specific colors elsewhere
+   * in the app (those must stay in sync with the legend everywhere).
+   */
+  accentColor?: string;
 }
 
 function statusColor(pct: number): string {
@@ -12,14 +21,14 @@ function statusColor(pct: number): string {
   return '#d03b3b';
 }
 
-export default function DonutGauge({ value, label, mode = 'conformance' }: Props) {
+export default function DonutGauge({ value, label, mode = 'conformance', accentColor }: Props) {
   const clamped = Math.min(Math.max(value, 0), 100);
   const data = [
     { value: clamped },
     { value: 100 - clamped },
   ];
 
-  const fillColor = mode === 'conformance' ? statusColor(clamped) : '#2a78d6';
+  const fillColor = mode === 'conformance' ? statusColor(clamped) : (accentColor ?? '#2a78d6');
   const trackColor = '#e1e0d9';
 
   return (

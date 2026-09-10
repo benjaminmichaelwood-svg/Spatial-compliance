@@ -2,6 +2,7 @@ import PptxGenJS from 'pptxgenjs';
 import type { DomainSolid, BlockSummary, Mode, BoundaryRegion } from '../../types';
 import { buildWaterfallData } from './WaterfallChart';
 import { getColumns, getDomainDefs } from './definitionsData';
+import type { TemplateTheme } from './templateTheme';
 
 export interface SlideData {
   id: string;
@@ -272,6 +273,7 @@ function addViewerSlide(
   pptx: PptxGenJS,
   data: SlideData,
   templateLayout?: string,
+  templateTheme?: TemplateTheme | null,
 ) {
   const opts: any = templateLayout ? { masterName: templateLayout } : {};
   const slide = pptx.addSlide(opts);
@@ -302,7 +304,7 @@ function addViewerSlide(
   }
 
   addDonutToSlide(slide, data.conformancePct, 'Conformance', statusColor(data.conformancePct), 7.3, 0.9, 1.3);
-  addDonutToSlide(slide, data.productionPct, 'Production', '2a78d6', 8.7, 0.9, 1.3);
+  addDonutToSlide(slide, data.productionPct, 'Production', templateTheme?.accentColor ?? '2a78d6', 8.7, 0.9, 1.3);
 
   const kpiY = 3.5;
   const kpis = [
@@ -469,37 +471,52 @@ export function buildSlides(
   return slides;
 }
 
+// LAYOUT_WIDE is 13.33" x 7.5" — corner coordinates for the template logo
+// placed by the slide master below.
+const LOGO_W = 1.2;
+const LOGO_H = 0.6;
+const LOGO_X = 13.33 - LOGO_W - 0.3;
+const LOGO_Y = 0.15;
+
 export async function generatePPTX(
   slides: SlideData[],
   comparisonName: string,
-  templateFile?: File | null,
+  templateTheme?: TemplateTheme | null,
 ): Promise<void> {
   const pptx = new PptxGenJS();
   pptx.layout = 'LAYOUT_WIDE';
   pptx.author = 'Spatial Compliance';
   pptx.title = comparisonName;
 
+  // Priority 20: previously templateTheme's predecessor (a raw File) was
+  // read into a base64 string and then never used — every slide was built
+  // identically regardless of what was uploaded (see this function's git
+  // history / CLAUDE.md's Priority 20 notes). Now, when a template's theme
+  // was successfully extracted (templateTheme.ts — accent color, and a
+  // logo if the template had an embedded image), every slide uses a real
+  // PptxGenJS slide master carrying that logo in the top-right corner, and
+  // the "Production" donut gauge is tinted with the extracted accent
+  // color. Domain-specific colors (the actual conformance domains'
+  // green/red/etc.) are never touched — they must stay in sync with the
+  // legend shown everywhere else in the app.
   let templateLayout: string | undefined;
-
-  if (templateFile) {
-    try {
-      const buf = await templateFile.arrayBuffer();
-      const templateBase64 = btoa(
-        new Uint8Array(buf).reduce((data, byte) => data + String.fromCharCode(byte), ''),
-      );
-      // PptxGenJS doesn't natively support loading templates as masters,
-      // but we store the file for future integration. For now, we proceed
-      // with default styling.
-    } catch {
-      // template load failed, continue with defaults
-    }
+  if (templateTheme) {
+    const masterName = 'TemplateMaster';
+    pptx.defineSlideMaster({
+      title: masterName,
+      background: { color: 'FFFFFF' },
+      objects: templateTheme.logoDataUrl
+        ? [{ image: { data: templateTheme.logoDataUrl, x: LOGO_X, y: LOGO_Y, w: LOGO_W, h: LOGO_H } }]
+        : [],
+    });
+    templateLayout = masterName;
   }
 
   for (const data of slides) {
     if (data.type === 'definitions') {
       addDefinitionsSlide(pptx, data.mode, data.subtitle, templateLayout);
     } else if (data.type === 'pit-viewer' || data.type === 'summary-viewer') {
-      addViewerSlide(pptx, data, templateLayout);
+      addViewerSlide(pptx, data, templateLayout, templateTheme);
     } else {
       addWaterfallSlide(pptx, data, templateLayout);
     }

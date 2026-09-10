@@ -2,6 +2,7 @@ import { useMemo, useState, useCallback, useRef } from 'react';
 import type { BoundaryRegion, ConformanceResult, Mode } from '../../types';
 import { exportCSV, exportOOT } from './exports';
 import { buildSlides, generatePPTX, type SlideData } from './pptxReport';
+import { extractTemplateTheme, type TemplateTheme } from './templateTheme';
 import SlidePreview from './SlidePreview';
 
 interface Props {
@@ -15,6 +16,8 @@ interface Props {
 export default function ReportPanel({ result, mode, boundaries, comparisonName, canvasRef }: Props) {
   const [generating, setGenerating] = useState(false);
   const [templateFile, setTemplateFile] = useState<File | null>(null);
+  const [templateTheme, setTemplateTheme] = useState<TemplateTheme | null>(null);
+  const [templateError, setTemplateError] = useState(false);
   const templateInputRef = useRef<HTMLInputElement>(null);
 
   const viewerScreenshot = useMemo(
@@ -42,11 +45,11 @@ export default function ReportPanel({ result, mode, boundaries, comparisonName, 
   const handleDownload = useCallback(async () => {
     setGenerating(true);
     try {
-      await generatePPTX(slides, comparisonName, templateFile);
+      await generatePPTX(slides, comparisonName, templateTheme);
     } finally {
       setGenerating(false);
     }
-  }, [slides, comparisonName, templateFile]);
+  }, [slides, comparisonName, templateTheme]);
 
   const handleExportCSV = useCallback(() => {
     exportCSV(result.domains, result.summary.block_summaries ?? [], `${comparisonName.replace(/\s+/g, '_')}_volumes.csv`);
@@ -56,9 +59,23 @@ export default function ReportPanel({ result, mode, boundaries, comparisonName, 
     exportOOT(result.domains, `${comparisonName.replace(/\s+/g, '_')}_solids.00t`);
   }, [result.domains, comparisonName]);
 
-  const handleTemplateChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleTemplateChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
     setTemplateFile(file);
+    setTemplateTheme(null);
+    setTemplateError(false);
+    if (!file) return;
+    const theme = await extractTemplateTheme(file);
+    if (theme) {
+      setTemplateTheme(theme);
+    } else {
+      // Non-fatal by design (matches this feature's existing philosophy —
+      // see templateTheme.ts and pptxReport.ts's Priority 20 comments): a
+      // template that can't be read falls back to default styling rather
+      // than blocking the report, with a small notice so the user knows
+      // their upload didn't take effect rather than silently ignoring it.
+      setTemplateError(true);
+    }
   }, []);
 
   return (
@@ -70,13 +87,21 @@ export default function ReportPanel({ result, mode, boundaries, comparisonName, 
           <p className="text-xs text-slate-400">
             {mode.toUpperCase()} mode · {slides.length} slides
           </p>
+          {templateError && (
+            <p className="text-xs text-amber-600">
+              Couldn't read {templateFile?.name} as a PPTX template — using default styling.
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          {/* Template upload */}
+          {/* Template upload — see templateTheme.ts (Priority 20): extracts
+              the template's accent color and, if present, an embedded
+              logo, both reflected live in the preview below and in the
+              downloaded PPTX. */}
           <input
             ref={templateInputRef}
             type="file"
-            accept="*/*"
+            accept=".pptx"
             onChange={handleTemplateChange}
             className="hidden"
           />
@@ -85,10 +110,19 @@ export default function ReportPanel({ result, mode, boundaries, comparisonName, 
             onClick={() => templateInputRef.current?.click()}
             className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50"
           >
-            {templateFile ? (
+            {templateTheme ? (
               <span className="flex items-center gap-1.5">
-                <svg className="h-3 w-3 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                <span
+                  className="h-3 w-3 flex-shrink-0 rounded-sm border border-black/10"
+                  style={{ backgroundColor: `#${templateTheme.accentColor}` }}
+                  title="Extracted accent color"
+                />
+                {templateFile?.name}
+              </span>
+            ) : templateFile ? (
+              <span className="flex items-center gap-1.5">
+                <svg className="h-3 w-3 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
                 </svg>
                 {templateFile.name}
               </span>
@@ -145,6 +179,7 @@ export default function ReportPanel({ result, mode, boundaries, comparisonName, 
           slides={slides}
           onReorder={setSlides}
           onRemove={handleRemoveSlide}
+          templateTheme={templateTheme}
         />
       </div>
     </div>
