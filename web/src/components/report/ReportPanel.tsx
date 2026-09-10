@@ -1,10 +1,23 @@
 import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
-import type { BoundaryRegion, ConformanceResult, Mode, SavedCameraView } from '../../types';
+import type {
+  BoundaryRegion,
+  ConformanceResult,
+  Mode,
+  ObjectStyle,
+  ReferenceLayer,
+  SavedCameraView,
+  SavedCrossSectionView,
+  SurfaceRole,
+  UploadedSurface,
+} from '../../types';
 import { SITE_WIDE_KEY } from '../../types';
 import type { ViewerHandle } from '../Viewer';
+import CrossSectionPanel from '../CrossSectionPanel';
+import { computeCrossSection } from '../../utils/crossSection';
 import { exportCSV, exportOOT } from './exports';
 import { buildSlides, generatePPTX, type SlideData } from './pptxReport';
 import { extractTemplateTheme, type TemplateTheme } from './templateTheme';
+import { renderCrossSectionToImage } from './renderCrossSectionToImage';
 import SlidePreview from './SlidePreview';
 
 interface Props {
@@ -19,9 +32,30 @@ interface Props {
   // this capture pass must be invisible to the live 3D view.
   viewerRef: React.RefObject<ViewerHandle | null>;
   savedCameraViews: Map<string, SavedCameraView>;
+  // Priority R3: everything a per-pit cross-section capture needs — the
+  // same inputs App.tsx already assembles for its own live
+  // CrossSectionPanel instance, threaded through so an off-screen instance
+  // here can reproduce a saved section exactly.
+  savedCrossSections: Map<string, SavedCrossSectionView>;
+  uploads: Map<SurfaceRole, UploadedSurface>;
+  pitBounds: { minX: number; maxX: number; minY: number; maxY: number } | null;
+  pitOutlineEdges: [number, number, number, number][];
+  domainStyles: Map<string, ObjectStyle>;
+  surfaceStyles: Map<SurfaceRole, ObjectStyle>;
+  refLayers: ReferenceLayer[];
 }
 
-export default function ReportPanel({ result, mode, boundaries, comparisonName, canvasRef, viewerRef, savedCameraViews }: Props) {
+// Priority R3: render width/height chosen to already match
+// addCrossSectionSlide's target box aspect ratio (12.3" x 5.8") so the
+// captured image fills it with no stretching, the same reasoning R1 used
+// for the waterfall chart's render width.
+const SECTION_RENDER_W = 1200;
+const SECTION_RENDER_H = Math.round(1200 * (5.8 / 12.3));
+
+export default function ReportPanel({
+  result, mode, boundaries, comparisonName, canvasRef, viewerRef, savedCameraViews,
+  savedCrossSections, uploads, pitBounds, pitOutlineEdges, domainStyles, surfaceStyles, refLayers,
+}: Props) {
   const [generating, setGenerating] = useState(false);
   const [templateFile, setTemplateFile] = useState<File | null>(null);
   const [templateTheme, setTemplateTheme] = useState<TemplateTheme | null>(null);
@@ -84,9 +118,71 @@ export default function ReportPanel({ result, mode, boundaries, comparisonName, 
     return () => { cancelled = true; };
   }, [result, boundaries, savedCameraViews, canvasRef, viewerRef]);
 
+  const [pitCrossSectionImages, setPitCrossSectionImages] = useState<Map<string, string>>(new Map());
+
+  // Priority R3: for every pit with a saved cross-section (Priority R2),
+  // mounts a real, off-screen CrossSectionPanel instance computed for that
+  // pit's saved A-B line and captures its own plot canvas — reusing
+  // CrossSectionPanel's actual rendering/calculation logic (explicitly out
+  // of scope to change for this item) rather than reimplementing any of
+  // it, the same "capture the real thing" principle R1 applied to the
+  // waterfall chart. A pit with no saved cross-section is simply left out
+  // of the map, so addCrossSectionSlide's/CrossSectionSlideContent's
+  // graceful placeholder shows instead — never blocking the rest of the
+  // report.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function captureSections() {
+      const nextImages = new Map<string, string>();
+      for (const b of boundaries) {
+        const view = savedCrossSections.get(b.name);
+        if (!view) continue;
+        const data = computeCrossSection(uploads, result.domains, view.p1, view.p2);
+        try {
+          const { dataUrl } = await renderCrossSectionToImage(
+            <CrossSectionPanel
+              data={data}
+              onClose={() => {}}
+              // CrossSectionPanel's own surfaceVisible/domainVisible props
+              // are vestigial (superseded by its internal
+              // hiddenProfiles/hiddenSolids state per this codebase's own
+              // 2026-07-21 session log) — empty Sets here mean "everything
+              // visible", the correct default for a static report capture.
+              surfaceVisible={new Set()}
+              domainVisible={new Set()}
+              domainStyles={domainStyles}
+              surfaceStyles={surfaceStyles}
+              sectionLine={[view.p1, view.p2]}
+              pitBounds={pitBounds}
+              pitOutlineEdges={pitOutlineEdges}
+              uploads={uploads}
+              refLayers={refLayers}
+            />,
+            SECTION_RENDER_W,
+            SECTION_RENDER_H,
+          );
+          if (cancelled) return;
+          nextImages.set(b.name, dataUrl);
+        } catch {
+          // A saved section that fails to render (e.g. its line no longer
+          // overlaps any current surface) degrades to the same graceful
+          // placeholder as "no saved section" rather than blocking the
+          // rest of the report.
+        }
+      }
+      if (!cancelled) {
+        setPitCrossSectionImages(nextImages);
+      }
+    }
+
+    captureSections();
+    return () => { cancelled = true; };
+  }, [result, boundaries, savedCrossSections, uploads, pitBounds, pitOutlineEdges, domainStyles, surfaceStyles, refLayers]);
+
   const initialSlides = useMemo(
-    () => buildSlides(result, mode, boundaries, comparisonName, viewerScreenshot, pitScreenshots),
-    [result, mode, boundaries, comparisonName, viewerScreenshot, pitScreenshots],
+    () => buildSlides(result, mode, boundaries, comparisonName, viewerScreenshot, pitScreenshots, pitCrossSectionImages),
+    [result, mode, boundaries, comparisonName, viewerScreenshot, pitScreenshots, pitCrossSectionImages],
   );
 
   const [slides, setSlides] = useState<SlideData[]>(initialSlides);

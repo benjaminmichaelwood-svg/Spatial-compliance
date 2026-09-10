@@ -1087,6 +1087,13 @@ export default function App() {
                     canvasRef={canvasRef}
                     viewerRef={viewerRef}
                     savedCameraViews={savedCameraViews}
+                    savedCrossSections={savedCrossSections}
+                    uploads={uploads}
+                    pitBounds={pitBounds}
+                    pitOutlineEdges={pitOutlineEdges}
+                    domainStyles={domainStyles}
+                    surfaceStyles={surfaceStyles}
+                    refLayers={refLayers}
                   />
                 </div>
                 <div

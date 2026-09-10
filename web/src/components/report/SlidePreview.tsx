@@ -78,6 +78,30 @@ function WaterfallSlideContent({ slide }: { slide: SlideData }) {
   );
 }
 
+// Priority R3: same image-or-placeholder pattern as ViewerSlideContent's
+// own screenshot handling, so a pit with no saved cross-section (Priority
+// R2) never renders blank in the live preview either — matches
+// addCrossSectionSlide's graceful placeholder in the exported deck exactly.
+function CrossSectionSlideContent({ slide }: { slide: SlideData }) {
+  return (
+    <div className="flex h-full w-full p-4">
+      <div className="relative flex-1 overflow-hidden rounded-lg bg-slate-100">
+        {slide.crossSectionImage ? (
+          <img
+            src={slide.crossSectionImage}
+            alt="Cross Section"
+            className="h-full w-full object-contain"
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-sm text-slate-400">
+            No cross-section defined for this area
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DefinitionsSlideContent({ slide }: { slide: SlideData }) {
   const defs = getDomainDefs(slide.mode);
   return (
@@ -170,7 +194,9 @@ export default function SlidePreview({ slides, onReorder, onRemove, templateThem
               ? <DefinitionsSlideContent slide={activeSlide} />
               : activeSlide.type === 'pit-viewer' || activeSlide.type === 'summary-viewer'
                 ? <ViewerSlideContent slide={activeSlide} templateTheme={templateTheme} />
-                : <WaterfallSlideContent slide={activeSlide} />
+                : activeSlide.type === 'pit-section'
+                  ? <CrossSectionSlideContent slide={activeSlide} />
+                  : <WaterfallSlideContent slide={activeSlide} />
           )}
         </div>
 
@@ -223,7 +249,13 @@ export default function SlidePreview({ slides, onReorder, onRemove, templateThem
                   {slide.title}
                 </span>
                 <span className="text-[7px] text-slate-400">
-                  {slide.type === 'definitions' ? 'Definitions' : slide.type.includes('viewer') ? '3D View' : 'Waterfall'}
+                  {slide.type === 'definitions'
+                    ? 'Definitions'
+                    : slide.type.includes('viewer')
+                      ? '3D View'
+                      : slide.type === 'pit-section'
+                        ? 'Cross Section'
+                        : 'Waterfall'}
                 </span>
               </button>
 

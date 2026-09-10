@@ -8,7 +8,7 @@ import { renderComponentToImage } from './renderComponentToImage';
 
 export interface SlideData {
   id: string;
-  type: 'definitions' | 'pit-viewer' | 'pit-waterfall' | 'summary-viewer' | 'summary-waterfall';
+  type: 'definitions' | 'pit-viewer' | 'pit-waterfall' | 'pit-section' | 'summary-viewer' | 'summary-waterfall';
   title: string;
   subtitle: string;
   pitName?: string;
@@ -19,6 +19,11 @@ export interface SlideData {
   plannedVol: number;
   actualVol: number;
   viewerScreenshot: string | null;
+  // Priority R3: set only on 'pit-section' slides, from ReportPanel.tsx's
+  // capture pass over each pit's saved cross-section (Priority R2). null
+  // means no saved cross-section exists for this pit — addCrossSectionSlide
+  // renders a graceful placeholder rather than leaving the slide blank.
+  crossSectionImage: string | null;
 }
 
 function formatVol(v: number): string {
@@ -272,6 +277,46 @@ async function addWaterfallSlide(
   return slide;
 }
 
+// Priority R3: cross-section slide for a pit — image-or-placeholder,
+// mirroring addViewerSlide's exact same pattern for its own screenshot
+// (same box proportions, same placeholder styling) rather than inventing a
+// new visual convention for "we don't have an image for this yet".
+function addCrossSectionSlide(
+  pptx: PptxGenJS,
+  data: SlideData,
+  templateLayout?: string,
+) {
+  const opts: any = templateLayout ? { masterName: templateLayout } : {};
+  const slide = pptx.addSlide(opts);
+
+  slide.addText(data.title, {
+    x: 0.4, y: 0.2, w: 12, h: 0.4,
+    fontSize: 18, bold: true, color: '1a1a19',
+  });
+  slide.addText(data.subtitle, {
+    x: 0.4, y: 0.55, w: 12, h: 0.3,
+    fontSize: 10, color: '898781',
+  });
+
+  if (data.crossSectionImage) {
+    slide.addImage({
+      data: data.crossSectionImage,
+      x: 0.5, y: 1.0, w: 12.3, h: 5.8,
+    });
+  } else {
+    slide.addShape('rect' as any, {
+      x: 0.5, y: 1.0, w: 12.3, h: 5.8,
+      fill: { color: 'F1F5F9' },
+    } as any);
+    slide.addText('No cross-section defined for this area', {
+      x: 0.5, y: 3.6, w: 12.3, h: 1,
+      fontSize: 14, color: '94A3B8', align: 'center',
+    });
+  }
+
+  return slide;
+}
+
 export function buildSlides(
   result: { domains: DomainSolid[]; summary: any },
   mode: Mode,
@@ -279,6 +324,11 @@ export function buildSlides(
   comparisonName: string,
   viewerScreenshot: string | null,
   pitScreenshots: Map<string, string>,
+  // Priority R3: per-pit cross-section images, keyed by boundary name —
+  // populated by ReportPanel.tsx only for pits with a saved cross-section
+  // (Priority R2); a pit with no entry gets addCrossSectionSlide's
+  // graceful placeholder instead of being skipped or left blank.
+  pitCrossSectionImages: Map<string, string>,
 ): SlideData[] {
   const slides: SlideData[] = [];
 
@@ -294,6 +344,7 @@ export function buildSlides(
     plannedVol: 0,
     actualVol: 0,
     viewerScreenshot: null,
+    crossSectionImage: null,
   });
 
   // Domain sets must match classify.rs's ConformanceSummary exactly
@@ -340,6 +391,7 @@ export function buildSlides(
       plannedVol: planned,
       actualVol: actual,
       viewerScreenshot: pitScreenshots.get(b.name) ?? null,
+      crossSectionImage: null,
     });
 
     slides.push({
@@ -355,6 +407,23 @@ export function buildSlides(
       plannedVol: planned,
       actualVol: actual,
       viewerScreenshot: null,
+      crossSectionImage: null,
+    });
+
+    slides.push({
+      id: `pit-section-${i}`,
+      type: 'pit-section',
+      title: `${b.name} — Cross Section`,
+      subtitle: `${mode.toUpperCase()} mode · ${comparisonName}`,
+      pitName: b.name,
+      domains: pitDomains,
+      mode,
+      conformancePct: confPct,
+      productionPct: prodPct,
+      plannedVol: planned,
+      actualVol: actual,
+      viewerScreenshot: null,
+      crossSectionImage: pitCrossSectionImages.get(b.name) ?? null,
     });
   }
 
@@ -375,6 +444,7 @@ export function buildSlides(
     plannedVol: allPlanned,
     actualVol: allActual,
     viewerScreenshot,
+    crossSectionImage: null,
   });
 
   slides.push({
@@ -389,6 +459,7 @@ export function buildSlides(
     plannedVol: allPlanned,
     actualVol: allActual,
     viewerScreenshot: null,
+    crossSectionImage: null,
   });
 
   return slides;
@@ -440,6 +511,8 @@ export async function generatePPTX(
       await addDefinitionsSlide(pptx, data.mode, data.subtitle, templateLayout);
     } else if (data.type === 'pit-viewer' || data.type === 'summary-viewer') {
       addViewerSlide(pptx, data, templateLayout, templateTheme);
+    } else if (data.type === 'pit-section') {
+      addCrossSectionSlide(pptx, data, templateLayout);
     } else {
       await addWaterfallSlide(pptx, data, templateLayout);
     }
