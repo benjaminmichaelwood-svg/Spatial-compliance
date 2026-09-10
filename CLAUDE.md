@@ -139,6 +139,7 @@ Run `node scripts/visual-check.mjs` (requires `npm run dev` on localhost:5173 an
 - GitHub Pages deployment with CI/CD
 - Session password gate
 - PPTX reporting with slide live preview, reorder/remove, and template upload (accent color + logo extracted and reflected in both the preview and the downloaded file — see Priority 20; full OOXML layout fidelity beyond that is a deliberate, documented scope boundary, not a gap)
+- Measurement tools — distance, elevation readout, area (re-verified end-to-end in Priority 21; live tooltip, locked measurements with saved labels, area outline + readout, Escape-to-cancel all confirmed working)
 
 ### In Progress / Pending
 - CAD performance overhaul (laggy, freezes on tab switch)
@@ -147,7 +148,6 @@ Run `node scripts/visual-check.mjs` (requires `npm run dev` on localhost:5173 an
 - Polygon drawing tool (currently broken)
 - Cross-section tool (2D elevation profile along user-defined section line)
 - Definitions slide with domain schematic diagram
-- Measurement tools (distance, elevation readout, area)
 - View presets (plan, section, isometric)
 - Selection with properties panel
 - Optional surfaces (minimum 2 instead of all 5)
@@ -419,6 +419,17 @@ Working through a 22-item prioritized action list (rendering/build/repo hygiene 
   - `pptxReport.ts`'s `generatePPTX` now takes a `TemplateTheme | null` (replacing the unused raw `File` param) and, when present, calls `pptx.defineSlideMaster(...)` with the logo positioned in the slide's top-right corner, applies that master to every slide via `masterName`, and tints the same "Production" donut in the actual exported deck.
 - **Verification**: new `templateTheme.test.ts` (6 tests, using `jszip` itself to build synthetic in-memory `.pptx` fixtures) — extracts a real accent color, falls back to the default when `theme1.xml` is absent, extracts an embedded PNG logo as a correct `data:` URL, returns `logoDataUrl: null` when no media exists, ignores non-image media (e.g. a hypothetical embedded video), and returns `null` outright for a file that isn't a valid zip at all. All 38 vitest tests pass (32 prior + 6 new). `tsc -b` and `vite build` both clean.
   - **End-to-end runtime verification** (dev server + Playwright, using a real synthetic `.pptx` built with `jszip` carrying a `FF6600` accent and a 1×1 PNG "logo"): uploading it shows the orange swatch in the header immediately; navigating to the "Site Summary" slide in the live preview shows the Production donut rendered in that same orange (screenshot confirmed, replacing the previous fixed blue) and the logo image visible in the screenshot area's corner; clicking "Download PPTX" produces a real ~215KB file with no console/page errors. **Unzipped the actual downloaded file and confirmed** it contains a real `ppt/slideMasters/slideMaster1.xml` and the logo PNG under `ppt/media/` — the template genuinely reaches the exported deck, not just the on-screen preview.
+
+### Master Priority 21 — Measure/distance tool (VERIFIED, no code changes needed)
+- The task's own text flagged that this was likely already substantially built (the 2026-07-21 session log documents "BUG 3 — Measure/distance tool redesign (Deswik-style)" as done, and Priority 19's split moved that same `MeasureClickHandler`/`MeasureCursorTracker`/`MeasureOverlay3D`/`computeMeasureMetrics` code into `components/viewer/SceneOverlays.tsx` and `geometryHelpers.ts` verbatim) — so this priority was a verification pass, not a fresh build, per the task's own guidance to confirm rather than assume more work is needed.
+- **Verified end-to-end via dev server + Playwright against real test-data surfaces** (not just reading the code):
+  - **Distance tool**: activating it shows the correct mode indicator ("Click first point to measure distance"), clicking a point on a real conformance solid updates the prompt ("Move cursor over surface..."), moving the cursor shows the live floating tooltip with world coordinates and Length/Plan Length/dZ/Bearing/Grade all populated, and clicking a second point locks the measurement — confirmed both via the DOM (saved-measurement label text) and visually (screenshot shows the cyan line + endpoint markers + label reading `323.39 m | ΔZ: -12.26 m · Plan: 323.16 m` rendered directly on the solid).
+  - **Area tool**: clicking 3 points on the solid draws a live triangular outline (screenshot confirmed) and shows the "Area: _ m²" overlay; confirmed both the click-to-place counter ("3 placed") and the final area readout appear.
+  - **Elevation readout**: the bottom-left "RL: _m" readout (via `CursorElevation`) updates live from mouse position throughout — visible in every screenshot taken during this check.
+  - **Clear all measurements** button appears once a measurement is saved and is wired correctly.
+  - **Escape cancels** the active tool (confirmed the area overlay disappears after pressing Escape mid-draw).
+  - No console or page errors in any of these runs.
+- **No code changes made for this item** — the feature works as designed. The only wrinkle hit while testing (not a bug, a test-setup detail worth recording): after "Run Conformance", both domains and surfaces default to hidden (`visible`/`surfaceVisible` are reset to empty sets in `App.tsx`'s `handleRun`, worker path) — a measure click needs *something visible* to raycast against, so a domain (or surface) must be toggled visible first. This is existing, intentional behavior (not something this priority touches), just easy to trip over when scripting a check.
 
 ## Conventions
 - Push completed work to main branch for deployment
