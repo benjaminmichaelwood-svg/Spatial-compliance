@@ -233,6 +233,10 @@ pub fn chain_segments(segments: &[IntersectionSegment], tolerance: f64) -> Vec<V
                     continue;
                 }
 
+                // SAFETY (panic audit): `chain` is seeded with 2 elements
+                // above and every mutation in this loop is a pop+push pair
+                // (net length unchanged) or a plain push/insert, so it never
+                // drops below 2 elements — first()/last() are always Some.
                 let front = chain.first().unwrap();
                 let back = chain.last().unwrap();
 

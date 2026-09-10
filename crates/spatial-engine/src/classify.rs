@@ -594,6 +594,9 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
     let mut domains: Vec<DomainSolid> = Vec::new();
 
     let mut present_indices: Vec<usize> = (0..5).filter(|&i| opt_surfaces[i].is_some()).collect();
+    // SAFETY (panic audit): present_indices is filtered to only indices
+    // where opt_surfaces[i].is_some() (line above), so every `a`/`b` drawn
+    // from it below is guaranteed Some.
     present_indices.sort_by(|&a, &b| {
         opt_surfaces[b].unwrap().num_triangles().cmp(&opt_surfaces[a].unwrap().num_triangles())
     });
@@ -609,6 +612,8 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
     }
 
     for &si in &present_indices {
+        // SAFETY (panic audit): si is drawn from present_indices, which by
+        // construction only contains indices where opt_surfaces[si] is Some.
         let ref_surface = opt_surfaces[si].unwrap();
 
         let mut tri_results: Vec<Vec<TriResult>> = vec![Vec::new(); ref_surface.num_triangles()];
@@ -647,6 +652,9 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
             let has_production = zs[0].is_some() && zs[1].is_some();
             let has_schedule = zs[2].is_some() && zs[3].is_some();
 
+            // SAFETY (panic audit): every zs[i].unwrap() below is reached
+            // only inside a branch that already checked is_some() on that
+            // exact index via has_production/has_schedule, so it can't panic.
             let intervals = if has_production && has_schedule {
                 let (ps, pe) = (zs[0].unwrap(), zs[1].unwrap());
                 let (ss, se) = (zs[2].unwrap(), zs[3].unwrap());
@@ -696,6 +704,9 @@ pub fn classify_conformance(input: &ConformanceInput) -> ConformanceResult {
                     let has_v_prod = vzs[0].is_some() && vzs[1].is_some();
                     let has_v_sched = vzs[2].is_some() && vzs[3].is_some();
 
+                    // SAFETY (panic audit): as above — every vzs[i].unwrap()
+                    // in this if/else-if chain is gated by a has_v_prod/
+                    // has_v_sched check on that same index.
                     if has_v_prod && has_v_sched {
                         let (upper, lower) = match input.mode {
                             Mode::Dig => per_vertex_bounds_dig(
@@ -1010,6 +1021,9 @@ pub fn classify_surface_domains(input: &ConformanceInput) -> Vec<(usize, Vec<u8>
         let has_production = zs[0].is_some() && zs[1].is_some();
         let has_schedule = zs[2].is_some() && zs[3].is_some();
 
+        // SAFETY (panic audit): same pattern as classify_conformance above —
+        // each zs[i].unwrap() is gated by a has_production/has_schedule
+        // check on that exact index.
         let intervals = if has_production && has_schedule {
             let (ps, pe) = (zs[0].unwrap(), zs[1].unwrap());
             let (ss, se) = (zs[2].unwrap(), zs[3].unwrap());

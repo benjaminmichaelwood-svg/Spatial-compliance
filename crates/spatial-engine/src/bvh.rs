@@ -156,10 +156,16 @@ fn build_recursive(
     tri_order[start..end].select_nth_unstable_by(mid - start, |&a, &b| {
         let ca = centroids[a];
         let cb = centroids[b];
+        // SAFETY (panic audit): TriSurface::validate() rejects non-finite
+        // coordinates before a surface ever reaches the BVH, but
+        // total_cmp (rather than partial_cmp().unwrap()) is used anyway as
+        // defense in depth — it has a well-defined total order for every
+        // f64 including NaN, so this can never panic even if that
+        // invariant is ever violated upstream.
         if split_x {
-            ca.0.partial_cmp(&cb.0).unwrap()
+            ca.0.total_cmp(&cb.0)
         } else {
-            ca.1.partial_cmp(&cb.1).unwrap()
+            ca.1.total_cmp(&cb.1)
         }
     });
 
@@ -213,6 +219,55 @@ mod tests {
         let bvh = SurfaceBvh::build(&s);
         let z = bvh.interpolate_z(5.0, 5.0);
         assert!((z.unwrap() - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn build_does_not_panic_on_zero_triangles() {
+        let s = TriSurface {
+            name: "empty".into(),
+            vertices: vec![Vec3::new(0.0, 0.0, 0.0)],
+            indices: vec![],
+        };
+        let bvh = SurfaceBvh::build(&s);
+        assert_eq!(bvh.interpolate_z(0.0, 0.0), None);
+    }
+
+    #[test]
+    fn build_does_not_panic_on_nan_centroid() {
+        // Regression test for the panic-safety pass: the centroid sort
+        // comparator used to be `partial_cmp(...).unwrap()`, which panics
+        // if any coordinate is NaN. TriSurface::validate() now rejects NaN
+        // surfaces before they reach the BVH, but this exercises the BVH
+        // in isolation (bypassing validate()) to confirm total_cmp holds
+        // as defense in depth even if that invariant is ever violated.
+        // A strip of 20 triangles (well over MAX_LEAF_SIZE=8) is used so
+        // build_recursive actually performs a split and invokes the
+        // centroid comparator rather than putting everything in one leaf.
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for col in 0..11u32 {
+            let x = col as f64 * 5.0;
+            vertices.push(Vec3::new(x, 0.0, col as f64));
+            vertices.push(Vec3::new(x, 10.0, col as f64));
+        }
+        vertices[0] = Vec3::new(f64::NAN, 0.0, 0.0);
+        for col in 0..10u32 {
+            let a = col * 2;
+            let b = a + 1;
+            let c = a + 2;
+            let d = a + 3;
+            indices.push([a, b, c]);
+            indices.push([b, d, c]);
+        }
+        let s = TriSurface {
+            name: "nan".into(),
+            vertices,
+            indices,
+        };
+        // Must not panic — the actual query result is unspecified once NaN
+        // is involved, only the absence of a panic is asserted.
+        let bvh = SurfaceBvh::build(&s);
+        let _ = bvh.interpolate_z(25.0, 5.0);
     }
 
     #[test]

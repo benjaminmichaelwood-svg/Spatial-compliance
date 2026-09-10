@@ -239,6 +239,9 @@ fn chain_segments(segments: &[([f64; 2], [f64; 2])]) -> Option<Vec<[f64; 2]>> {
     used[0] = true;
 
     loop {
+        // SAFETY (panic audit): `chain` is seeded with 2 elements above and
+        // this loop only ever pushes/inserts onto it, never removes, so
+        // last() is always Some.
         let tail = *chain.last().unwrap();
         let mut found = false;
         for (i, seg) in segments.iter().enumerate() {

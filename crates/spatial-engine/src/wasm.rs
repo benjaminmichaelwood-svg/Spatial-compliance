@@ -7,6 +7,16 @@ use crate::dxf::parse_dxf_polygons;
 use crate::format::{decode_surface, decode_surfaces, encode_surfaces};
 use crate::types::{BoundaryRegion, TriSurface, Vec3};
 
+/// Runs once when the WASM module is instantiated. Any panic that still
+/// occurs despite the Result-based error handling below (an out-of-memory
+/// abort, an unforeseen bug) now produces a real JS console error with a
+/// Rust stack trace instead of an opaque `RuntimeError: unreachable
+/// executed` with no context — see the panic-safety pass in CLAUDE.md.
+#[wasm_bindgen(start)]
+pub fn init_panic_hook() {
+    console_error_panic_hook::set_once();
+}
+
 #[wasm_bindgen]
 pub fn parse_surfaces(data: &[u8]) -> Result<JsValue, JsValue> {
     let surfaces = decode_surfaces(data).map_err(|e| JsValue::from_str(&e))?;
@@ -19,6 +29,8 @@ pub fn encode_surface_pair(surface_a_json: &str, surface_b_json: &str) -> Result
         serde_json::from_str(surface_a_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let b: TriSurface =
         serde_json::from_str(surface_b_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    a.validate().map_err(|e| JsValue::from_str(&e))?;
+    b.validate().map_err(|e| JsValue::from_str(&e))?;
     Ok(encode_surfaces(&[a, b]))
 }
 
@@ -54,6 +66,8 @@ pub fn run_cut_fill_from_json(
         serde_json::from_str(surface_a_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let b: TriSurface =
         serde_json::from_str(surface_b_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    a.validate().map_err(|e| JsValue::from_str(&e))?;
+    b.validate().map_err(|e| JsValue::from_str(&e))?;
 
     let filter = SliverFilter {
         min_volume_m3: min_volume,
@@ -70,9 +84,13 @@ fn parse_optional_surface(json: &str) -> Result<Option<TriSurface>, JsValue> {
     if json.is_empty() {
         Ok(None)
     } else {
-        serde_json::from_str(json)
-            .map(Some)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+        let surface: TriSurface =
+            serde_json::from_str(json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        // JSON surfaces skip format::decode_surfaces' index/finite checks
+        // entirely, so validate here — this is the shared choke point for
+        // every *_json/_from_json entry point below.
+        surface.validate().map_err(|e| JsValue::from_str(&e))?;
+        Ok(Some(surface))
     }
 }
 
@@ -226,6 +244,7 @@ pub fn extract_boundary_from_surface(data: &[u8]) -> Result<JsValue, JsValue> {
 pub fn extract_boundary_from_surface_json(surface_json: &str) -> Result<JsValue, JsValue> {
     let surface: TriSurface =
         serde_json::from_str(surface_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    surface.validate().map_err(|e| JsValue::from_str(&e))?;
 
     let region = extract_surface_outline(&surface)
         .ok_or_else(|| JsValue::from_str("Could not extract boundary outline from surface"))?;
@@ -237,6 +256,9 @@ pub fn extract_boundary_from_surface_json(surface_json: &str) -> Result<JsValue,
 pub fn encode_surfaces_from_json(surfaces_json: &str) -> Result<Vec<u8>, JsValue> {
     let surfaces: Vec<TriSurface> =
         serde_json::from_str(surfaces_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    for s in &surfaces {
+        s.validate().map_err(|e| JsValue::from_str(&e))?;
+    }
     Ok(encode_surfaces(&surfaces))
 }
 
@@ -320,6 +342,9 @@ pub fn run_conformance_flat(
     let domains_arr = js_sys::Array::new();
     for d in &result.domains {
         let domain_obj = js_sys::Object::new();
+        // SAFETY (panic audit): serializing a plain `Domain` enum variant to a
+        // JSON string cannot fail (no floats/maps/recursion involved), so
+        // `.unwrap()` here can't panic on any input.
         js_sys::Reflect::set(&domain_obj, &"domain".into(), &JsValue::from_str(&serde_json::to_string(&d.domain).unwrap().trim_matches('"')))?;
         js_sys::Reflect::set(&domain_obj, &"label".into(), &JsValue::from_str(&d.label))?;
         js_sys::Reflect::set(&domain_obj, &"color".into(), &JsValue::from_str(&d.color))?;

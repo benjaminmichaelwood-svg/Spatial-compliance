@@ -1,3 +1,8 @@
+// NOTE (panic audit): this is a local developer CLI for generating fixture
+// files, not part of the WASM engine reachable from the browser/untrusted
+// input — its .unwrap() calls only touch paths/data this tool itself
+// controls, so crashing with a Rust backtrace on a local misconfiguration
+// (e.g. an unwritable output dir) is acceptable and left as-is.
 use spatial_engine::format::encode_surface;
 use spatial_engine::types::{TriSurface, Vec3};
 use std::fs;

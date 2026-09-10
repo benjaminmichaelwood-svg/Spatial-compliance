@@ -137,9 +137,13 @@ pub fn extract_surface_outline(surface: &TriSurface) -> Option<BoundaryRegion> {
         return None;
     }
 
+    // SAFETY (panic audit): the comparator uses total_cmp (never panics,
+    // even on a NaN polygon_area from a degenerate loop) and the outer
+    // .unwrap() is guarded by the `loops.is_empty()` check just above —
+    // max_by on a non-empty iterator always yields Some.
     let largest = loops
         .into_iter()
-        .max_by(|a, b| polygon_area(a).partial_cmp(&polygon_area(b)).unwrap())
+        .max_by(|a, b| polygon_area(a).total_cmp(&polygon_area(b)))
         .unwrap();
 
     Some(BoundaryRegion {

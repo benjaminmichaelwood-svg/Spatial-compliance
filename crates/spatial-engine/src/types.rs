@@ -113,6 +113,38 @@ pub struct TriSurface {
 }
 
 impl TriSurface {
+    /// Validate that this surface is safe to feed into the BVH/classify/solid
+    /// pipeline: every triangle index must be in-bounds for `vertices`, and
+    /// every coordinate must be finite. Surfaces decoded from a .00t binary
+    /// already get equivalent checks in `format::decode_surfaces`, but
+    /// surfaces arriving as JSON (the `*_from_json`/`*_json` WASM entry
+    /// points) skip that path entirely, so this is the single choke point
+    /// that keeps a malformed/hand-crafted surface from panicking deep in
+    /// unchecked array indexing (TriSurface::triangle, bvh.rs, solid.rs) or
+    /// a NaN comparator (bvh.rs's centroid sort, boundary.rs's max_by).
+    pub fn validate(&self) -> Result<(), String> {
+        let vertex_count = self.vertices.len();
+        for (i, v) in self.vertices.iter().enumerate() {
+            if !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite() {
+                return Err(format!(
+                    "Surface '{}': vertex {} has a non-finite coordinate ({}, {}, {}) — the file may be corrupt.",
+                    self.name, i, v.x, v.y, v.z
+                ));
+            }
+        }
+        for (i, tri) in self.indices.iter().enumerate() {
+            for &vi in tri {
+                if vi as usize >= vertex_count {
+                    return Err(format!(
+                        "Surface '{}': triangle {} references vertex index {} but only {} vertices exist — the file may be corrupt or truncated.",
+                        self.name, i, vi, vertex_count
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn triangle(&self, i: usize) -> Triangle {
         let idx = self.indices[i];
         Triangle::new(
@@ -142,6 +174,65 @@ impl TriSurface {
             max.z = max.z.max(v.z);
         }
         (min, max)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_accepts_well_formed_surface() {
+        let s = TriSurface {
+            name: "ok".into(),
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            indices: vec![[0, 1, 2]],
+        };
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_bounds_index() {
+        let s = TriSurface {
+            name: "bad".into(),
+            vertices: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)],
+            indices: vec![[0, 1, 99]],
+        };
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("index 99"), "error was: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_nan_vertex() {
+        let s = TriSurface {
+            name: "bad".into(),
+            vertices: vec![
+                Vec3::new(f64::NAN, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            indices: vec![[0, 1, 2]],
+        };
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("non-finite"), "error was: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_infinite_vertex() {
+        let s = TriSurface {
+            name: "bad".into(),
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(f64::NEG_INFINITY, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            indices: vec![[0, 1, 2]],
+        };
+        assert!(s.validate().is_err());
     }
 }
 

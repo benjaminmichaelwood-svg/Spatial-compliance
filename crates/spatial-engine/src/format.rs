@@ -40,6 +40,12 @@ pub fn decode_surfaces(data: &[u8]) -> Result<Vec<TriSurface>, String> {
         let e = read_be_f64(data, off);
         let n = read_be_f64(data, off + 8);
         let rl = read_be_f64(data, off + 16);
+        if !e.is_finite() || !n.is_finite() || !rl.is_finite() {
+            return Err(format!(
+                "Vertex {} has a non-finite coordinate ({}, {}, {}) — the file is likely corrupt.",
+                i, e, n, rl
+            ));
+        }
         vertices.push(Vec3::new(e, n, rl));
     }
 
@@ -116,6 +122,11 @@ fn encode_single(surface: &TriSurface) -> Vec<u8> {
     buf
 }
 
+// SAFETY (panic audit): every call site in decode_surfaces() checks
+// `data.len()` against the required size (header, then the full
+// vertex+triangle span) before reading, so `offset..offset+N` is always
+// in-bounds here and `try_into()` can never fail. Left as `.unwrap()`
+// rather than threading a Result through a hot per-vertex/per-triangle loop.
 fn read_be_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap())
 }
@@ -277,6 +288,41 @@ mod tests {
     fn rejects_truncated() {
         let data = vec![0u8; 10];
         assert!(decode_surfaces(&data).is_err());
+    }
+
+    #[test]
+    fn rejects_nan_coordinate() {
+        let surface = TriSurface {
+            name: String::new(),
+            vertices: vec![
+                Vec3::new(f64::NAN, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            indices: vec![[0, 1, 2]],
+        };
+        let encoded = encode_surface(&surface);
+        // encode_surface writes the NaN bit pattern faithfully; corrupt bytes
+        // producing NaN is exactly the real-world failure mode being guarded
+        // against (garbage bytes that happen to be a valid f64 NaN encoding).
+        let err = decode_surfaces(&encoded).unwrap_err();
+        assert!(err.contains("non-finite"), "error was: {err}");
+    }
+
+    #[test]
+    fn rejects_infinite_coordinate() {
+        let surface = TriSurface {
+            name: String::new(),
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(f64::INFINITY, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            indices: vec![[0, 1, 2]],
+        };
+        let encoded = encode_surface(&surface);
+        let err = decode_surfaces(&encoded).unwrap_err();
+        assert!(err.contains("non-finite"), "error was: {err}");
     }
 
     #[test]
