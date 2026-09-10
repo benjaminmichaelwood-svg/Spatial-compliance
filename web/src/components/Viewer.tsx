@@ -780,11 +780,51 @@ interface DrawingLayerProps {
 
 function DrawingLayer({ points, isDrawing, onAddPoint, onFinish, displayZ, sphereRadius }: DrawingLayerProps) {
   const lastClickRef = useRef(0);
+  const { scene, camera, gl } = useThree();
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
 
-  const handleClick = useCallback(
-    (e: any) => {
-      if (!isDrawing) return;
+  // Root cause of "polygon draw tool does nothing": this used to be an
+  // invisible THREE.PlaneGeometry(100000, 100000) mesh positioned at world
+  // origin (position={[0, 0, displayZ]}). Mine surfaces render at their raw
+  // Easting/Northing coordinates (routinely hundreds of thousands of units
+  // from the origin — CLAUDE.md's own sample data sits around
+  // 782000/7331000) with no recentering anywhere in the frontend, so that
+  // catch-plane was never anywhere near the camera/terrain the user is
+  // actually looking at and clicking on: raycasts from the camera toward
+  // the visible mine site would essentially never intersect a 100,000-unit
+  // plane centered 700+ km away at (0, 0). Fixed by raycasting against the
+  // real, visible scene meshes instead — the same working pattern
+  // MeasureClickHandler already uses below. Every mesh with a computed
+  // .boundsTree (surfaces/domain solids, set up elsewhere in this file)
+  // automatically gets three-mesh-bvh-accelerated raycasting via the
+  // `THREE.Mesh.prototype.raycast = acceleratedRaycast` override at the top
+  // of this file, satisfying CLAUDE.md's "Raycasting via three-mesh-bvh
+  // only" — this is the same global override, not a separate path.
+  useEffect(() => {
+    if (!isDrawing) return;
+    const canvas = gl.domElement;
+
+    const onClick = (e: MouseEvent) => {
+      // Capture phase + stopPropagation so this fires and consumes the
+      // click before react-three-fiber's own (bubble-phase) click handling
+      // reaches it — otherwise a click meant to place a draw point would
+      // also trigger a surface's onClick (e.g. its selection tooltip)
+      // underneath the cursor.
       e.stopPropagation();
+      const rect = canvas.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      raycaster.setFromCamera(ndc, camera);
+      const meshes: THREE.Mesh[] = [];
+      scene.traverse((obj) => { if (obj instanceof THREE.Mesh && obj.visible) meshes.push(obj); });
+      raycaster.firstHitOnly = true;
+      const hits = raycaster.intersectObjects(meshes, false);
+      raycaster.firstHitOnly = false;
+      if (hits.length === 0) return;
+      const point = hits[0].point;
+
       const now = Date.now();
       if (now - lastClickRef.current < 350 && points.length >= 3) {
         lastClickRef.current = 0;
@@ -792,12 +832,12 @@ function DrawingLayer({ points, isDrawing, onAddPoint, onFinish, displayZ, spher
         return;
       }
       lastClickRef.current = now;
-      if (e.point) {
-        onAddPoint(e.point.x, e.point.y);
-      }
-    },
-    [isDrawing, onAddPoint, onFinish, points.length],
-  );
+      onAddPoint(point.x, point.y);
+    };
+
+    canvas.addEventListener('click', onClick, { capture: true });
+    return () => canvas.removeEventListener('click', onClick, { capture: true });
+  }, [isDrawing, scene, camera, gl, raycaster, onAddPoint, onFinish, points.length]);
 
   if (!isDrawing && points.length === 0) return null;
 
@@ -809,12 +849,6 @@ function DrawingLayer({ points, isDrawing, onAddPoint, onFinish, displayZ, spher
 
   return (
     <>
-      {isDrawing && (
-        <mesh visible={false} onClick={handleClick} position={[0, 0, displayZ]}>
-          <planeGeometry args={[100000, 100000]} />
-          <meshBasicMaterial transparent opacity={0} />
-        </mesh>
-      )}
       {linePoints.length >= 2 && (
         <Line points={linePoints} color="#f97316" lineWidth={2} />
       )}
