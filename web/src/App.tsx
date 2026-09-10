@@ -252,6 +252,73 @@ export default function App() {
     debouncedSave({ comparisonName, mode, settings, boundaries, uploads });
   }, [step, restorableSession, comparisonName, mode, settings, boundaries, uploads, debouncedSave]);
 
+  // General undo/redo — scoped to settings, boundary region definitions,
+  // and the background toggle. Deliberately does NOT cover surface
+  // upload/removal (re-parsing large files as part of an undo stack would
+  // be expensive, and Priority 11's remove action is already a deliberate,
+  // confirmed action) or conformance results (recomputing on every undo
+  // step would be surprising and slow). `mode` is excluded too — there's
+  // no in-workspace control that changes it once a comparison is created,
+  // so there's nothing for a user to undo there. This is a single combined
+  // history (one snapshot per meaningfully-different state), not
+  // independent per-field stacks, matching how a person actually thinks
+  // about "undo my last change".
+  interface UndoSnapshot {
+    settings: Settings;
+    boundaries: BoundaryRegion[];
+    background: ViewerBackground;
+  }
+  const undoRedoInFlight = useRef(false);
+  const lastSnapshotRef = useRef<UndoSnapshot>({ settings, boundaries, background });
+  const [undoStack, setUndoStack] = useState<UndoSnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<UndoSnapshot[]>([]);
+  const UNDO_HISTORY_LIMIT = 50;
+
+  useEffect(() => {
+    const snapshot: UndoSnapshot = { settings, boundaries, background };
+    if (undoRedoInFlight.current) {
+      undoRedoInFlight.current = false;
+      lastSnapshotRef.current = snapshot;
+      return;
+    }
+    const prev = lastSnapshotRef.current;
+    if (JSON.stringify(prev) === JSON.stringify(snapshot)) return; // no real change (e.g. initial mount)
+    setUndoStack((s) => [...s, prev].slice(-UNDO_HISTORY_LIMIT));
+    setRedoStack([]);
+    lastSnapshotRef.current = snapshot;
+  }, [settings, boundaries, background]);
+
+  const applySnapshot = useCallback((s: UndoSnapshot) => {
+    undoRedoInFlight.current = true;
+    setSettings(s.settings);
+    setBoundaries(s.boundaries);
+    setBackground(s.background);
+  }, []);
+
+  // NOTE: deliberately not using a functional setState updater to decide
+  // *whether* to act (e.g. `setUndoStack(stack => { ...side effects...})`)
+  // — React does not guarantee an updater function runs exactly once (it
+  // can re-invoke it, e.g. under StrictMode's double-invoke checks), so
+  // side effects like applySnapshot()/other setState calls inside one can
+  // silently fire more than once. Reading `undoStack`/`redoStack` from the
+  // closure instead (always current, since this callback is recreated
+  // whenever they change) and keeping the actual updater calls pure.
+  const handleUndo = useCallback(() => {
+    if (undoStack.length === 0) return;
+    const target = undoStack[undoStack.length - 1];
+    setRedoStack((r) => [lastSnapshotRef.current, ...r]);
+    setUndoStack((s) => s.slice(0, -1));
+    applySnapshot(target);
+  }, [undoStack, applySnapshot]);
+
+  const handleRedo = useCallback(() => {
+    if (redoStack.length === 0) return;
+    const target = redoStack[0];
+    setUndoStack((s) => [...s, lastSnapshotRef.current]);
+    setRedoStack((r) => r.slice(1));
+    applySnapshot(target);
+  }, [redoStack, applySnapshot]);
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -274,6 +341,22 @@ export default function App() {
           return;
         }
       }
+      // General undo/redo — standard OS-convention keys (Ctrl/Cmd+Z,
+      // Ctrl/Cmd+Shift+Z or Ctrl+Y), checked only while NOT actively
+      // drawing a polygon so it never conflicts with that tool's own
+      // step-back-last-point undo (Ctrl/Cmd+Z) handled further below,
+      // which is left completely untouched.
+      if (!isDrawing && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) handleRedo();
+        else handleUndo();
+        return;
+      }
+      if (!isDrawing && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
       if (!isDrawing) return;
       if (e.key === 'Enter') {
         if (measureTool === 'area' && measurePoints.length >= 3) {
@@ -286,7 +369,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [isDrawing, isDrawingSection, drawPoints, measureTool, selectedId, measurePoints.length]);
+  }, [isDrawing, isDrawingSection, drawPoints, measureTool, selectedId, measurePoints.length, handleUndo, handleRedo]);
 
   const finishDrawing = useCallback(() => {
     if (drawPoints.length >= 3) {
@@ -965,6 +1048,28 @@ export default function App() {
             {mode}
           </span>
           <div className="ml-2 flex items-center gap-1 border-l border-slate-700 pl-2">
+            <button
+              type="button"
+              onClick={handleUndo}
+              disabled={undoStack.length === 0}
+              title="Undo (Ctrl/Cmd+Z) — settings, boundaries, background"
+              className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:pointer-events-none disabled:opacity-30"
+            >
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L4 10m0 0l5-5m-5 5h11a4 4 0 010 8h-1" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              onClick={handleRedo}
+              disabled={redoStack.length === 0}
+              title="Redo (Ctrl/Cmd+Shift+Z)"
+              className="mr-1 rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:pointer-events-none disabled:opacity-30"
+            >
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 15l5-5m0 0l-5-5m5 5H9a4 4 0 000 8h1" />
+              </svg>
+            </button>
             <button
               type="button"
               onClick={handleSaveProject}
