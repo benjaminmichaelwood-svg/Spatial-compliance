@@ -53,6 +53,7 @@ import AppHeader from './components/app/AppHeader';
 import PropertiesPanel from './components/app/PropertiesPanel';
 import ProgressBar from './components/app/ProgressBar';
 import DrawingControlsOverlay from './components/app/DrawingControlsOverlay';
+import ReportSetupOverlay from './components/app/ReportSetupOverlay';
 
 
 function makeSampleUpload(z: number, name: string, role: SurfaceRole, fileName: string, size = 20): UploadedSurface {
@@ -131,6 +132,14 @@ export default function App() {
   const [savedCameraViews, setSavedCameraViews] = useState<Map<string, SavedCameraView>>(new Map());
   const [savedCrossSections, setSavedCrossSections] = useState<Map<string, SavedCrossSectionView>>(new Map());
   const [captureTarget, setCaptureTarget] = useState<string>(SITE_WIDE_KEY);
+
+  // Priority R7: guided "Report Setup" — steps captureTarget through every
+  // target (site-wide + each pit) in sequence rather than the user picking
+  // each one from the selector above by hand. Reuses R2's capture
+  // mechanism as-is (handleSaveCameraView, applyPreset); this only adds
+  // sequencing state on top.
+  const [wizardActive, setWizardActive] = useState(false);
+  const [wizardIndex, setWizardIndex] = useState(0);
 
   const [background, setBackground] = useState<ViewerBackground>('light');
   const [domainStyles, setDomainStyles] = useState<Map<string, ObjectStyle>>(new Map());
@@ -833,6 +842,62 @@ export default function App() {
     });
   }, [captureTarget]);
 
+  // Priority R7: every capture target in a fixed, stable order — site-wide
+  // first, then each boundary in the order they appear in the Boundaries
+  // panel. Recomputed only when boundaries actually changes.
+  const wizardTargets = useMemo(() => [SITE_WIDE_KEY, ...boundaries.map(b => b.name)], [boundaries]);
+
+  const goToWizardStep = useCallback((idx: number) => {
+    const clamped = Math.max(0, Math.min(idx, wizardTargets.length - 1));
+    setWizardIndex(clamped);
+    setCaptureTarget(wizardTargets[clamped]);
+    // "auto-frame" per the task's own described flow (auto-frame -> user
+    // adjusts -> capture) — reuses the Viewer's EXISTING whole-scene 'fit'
+    // preset rather than inventing new per-boundary framing math; the
+    // task's own wording already expects the user to manually adjust from
+    // there before capturing, so a precise per-pit frame isn't required
+    // for this to work as described.
+    viewerRef.current?.applyPreset('fit');
+  }, [wizardTargets]);
+
+  const handleStartReportSetup = useCallback(() => {
+    setWizardActive(true);
+    goToWizardStep(0);
+  }, [goToWizardStep]);
+
+  const handleWizardClose = useCallback(() => {
+    setWizardActive(false);
+  }, []);
+
+  const handleWizardBack = useCallback(() => {
+    goToWizardStep(wizardIndex - 1);
+  }, [goToWizardStep, wizardIndex]);
+
+  const handleWizardSkip = useCallback(() => {
+    if (wizardIndex >= wizardTargets.length - 1) {
+      setWizardActive(false);
+      return;
+    }
+    goToWizardStep(wizardIndex + 1);
+  }, [goToWizardStep, wizardIndex, wizardTargets.length]);
+
+  // Priority R7: "capture and next" — saves the CURRENT step's view (via
+  // R2's existing handleSaveCameraView, reading captureTarget/viewerRef as
+  // it already does) before advancing, so the save always applies to the
+  // step the user was just looking at, not the one they're about to see.
+  const handleWizardCaptureAndNext = useCallback(() => {
+    handleSaveCameraView();
+    handleWizardSkip();
+  }, [handleSaveCameraView, handleWizardSkip]);
+
+  // Safety net if boundaries shrink (e.g. a boundary deleted) while the
+  // wizard is mid-sequence past the new last index.
+  useEffect(() => {
+    if (wizardActive && wizardIndex >= wizardTargets.length) {
+      setWizardActive(false);
+    }
+  }, [wizardActive, wizardIndex, wizardTargets.length]);
+
   // Reference layers (dropped .00t/.dxf/.arch_d overlays) — see
   // hooks/useReferenceLayers.ts (Priority 19 split this self-contained
   // feature out of App.tsx; no logic changed).
@@ -941,6 +1006,8 @@ export default function App() {
           setSavedCameraViews(new Map());
           setSavedCrossSections(new Map());
           setCaptureTarget(SITE_WIDE_KEY);
+          setWizardActive(false);
+          setWizardIndex(0);
           if (useWorker) workerClearSurfaces();
         }}
         canUndo={undoStack.length > 0}
@@ -968,6 +1035,8 @@ export default function App() {
         hasSavedCameraView={savedCameraViews.has(captureTarget)}
         onSaveCameraView={handleSaveCameraView}
         onResetCameraView={handleResetCameraView}
+        wizardActive={wizardActive}
+        onStartReportSetup={handleStartReportSetup}
       />
 
       {/* Body */}
@@ -1213,6 +1282,20 @@ export default function App() {
         onFinish={finishDrawing}
         onCancel={cancelDrawing}
       />
+
+      {mainTab === 'viewer' && (
+        <ReportSetupOverlay
+          active={wizardActive}
+          targetLabel={captureTarget === SITE_WIDE_KEY ? 'Site-wide' : captureTarget}
+          index={wizardIndex}
+          total={wizardTargets.length}
+          hasSavedView={savedCameraViews.has(captureTarget)}
+          onBack={handleWizardBack}
+          onSkip={handleWizardSkip}
+          onCaptureAndNext={handleWizardCaptureAndNext}
+          onClose={handleWizardClose}
+        />
+      )}
 
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
     </div>

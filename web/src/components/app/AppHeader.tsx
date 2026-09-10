@@ -42,6 +42,14 @@ interface Props {
   hasSavedCameraView: boolean;
   onSaveCameraView: () => void;
   onResetCameraView: () => void;
+
+  // Priority R7: guided "Report Setup" mode drives captureTarget itself as
+  // it steps through targets, so the manual selector/Save/Reset controls
+  // are disabled while it's running to avoid two things fighting over the
+  // same target at once — the wizard's own overlay (ReportSetupOverlay)
+  // is the only capture control while active.
+  wizardActive: boolean;
+  onStartReportSetup: () => void;
 }
 
 export default function AppHeader({
@@ -50,6 +58,7 @@ export default function AppHeader({
   savedMeasurementCount, onClearMeasurements, isDrawingSection, onCancelSection,
   sectionLineActive, onClearSection, onStartSection, onCapture,
   boundaries, captureTarget, onCaptureTargetChange, hasSavedCameraView, onSaveCameraView, onResetCameraView,
+  wizardActive, onStartReportSetup,
 }: Props) {
   const loadProjectInputRef = useRef<HTMLInputElement>(null);
 
@@ -243,8 +252,9 @@ export default function AppHeader({
           <select
             value={captureTarget}
             onChange={(e) => onCaptureTargetChange(e.target.value)}
+            disabled={wizardActive}
             title="Report target — which pit this saved view applies to"
-            className="rounded border border-slate-700 bg-slate-800 px-1.5 py-1 text-[10px] font-medium text-slate-300 outline-none hover:border-slate-600"
+            className="rounded border border-slate-700 bg-slate-800 px-1.5 py-1 text-[10px] font-medium text-slate-300 outline-none hover:border-slate-600 disabled:opacity-40"
           >
             <option value={SITE_WIDE_KEY}>Site-wide</option>
             {boundaries.map((b) => (
@@ -258,7 +268,8 @@ export default function AppHeader({
           <button
             type="button"
             onClick={onSaveCameraView}
-            className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white"
+            disabled={wizardActive}
+            className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white disabled:pointer-events-none disabled:opacity-40"
             title={`Save current camera view for report — ${captureTarget === SITE_WIDE_KEY ? 'Site-wide' : captureTarget}`}
           >
             Save View
@@ -267,12 +278,29 @@ export default function AppHeader({
             <button
               type="button"
               onClick={onResetCameraView}
-              className="rounded px-2 py-1 text-[10px] font-medium text-amber-400 hover:bg-slate-700"
+              disabled={wizardActive}
+              className="rounded px-2 py-1 text-[10px] font-medium text-amber-400 hover:bg-slate-700 disabled:pointer-events-none disabled:opacity-40"
               title="Reset to auto-fit for this target"
             >
               Reset
             </button>
           )}
+
+          <div className="mx-1 h-4 w-px bg-slate-700" />
+
+          {/* Priority R7: guided sequencing on top of R2's existing save
+              mechanism — steps through every target (site-wide + each
+              pit) in one flow instead of picking each one from the
+              selector above individually. */}
+          <button
+            type="button"
+            onClick={onStartReportSetup}
+            disabled={wizardActive}
+            className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white disabled:pointer-events-none disabled:opacity-40"
+            title="Guided Report Setup — step through every pit and capture a view for each"
+          >
+            Report Setup
+          </button>
         </div>
       )}
     </header>
