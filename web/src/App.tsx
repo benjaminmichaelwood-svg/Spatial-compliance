@@ -322,6 +322,41 @@ export default function App() {
     [useWorker, uploads],
   );
 
+  const handleRemoveSurface = useCallback(
+    (role: SurfaceRole) => {
+      const next = new Map(uploads);
+      if (!next.delete(role)) return;
+      setUploads(next);
+      setSurfaceVisible((prev) => {
+        const s = new Set(prev);
+        s.delete(role);
+        return s;
+      });
+      setSurfaceStyles((prev) => {
+        if (!prev.has(role)) return prev;
+        const m = new Map(prev);
+        m.delete(role);
+        return m;
+      });
+      setDomainMaps((prev) => {
+        if (!prev.has(role)) return prev;
+        const m = new Map(prev);
+        m.delete(role);
+        return m;
+      });
+      setHeatmapMode((prev) => (prev && prev.paintRole === role ? null : prev));
+      if (useWorker) workerRemoveSurface(role);
+      // A conformance result is a function of every assigned surface —
+      // removing one invalidates it. Rather than leaving a stale result
+      // displayed (or trying to partially patch it), clear it and require
+      // Run Conformance again, same as any other input change would.
+      setResult(null);
+      setFlatDomains([]);
+      setVisible(new Set<string>());
+    },
+    [uploads, useWorker],
+  );
+
   const handleLoadSample = useCallback(() => {
     const sampleSurfaces: Record<SurfaceRole, { z: number; label: string }> =
       mode === 'dig'
@@ -895,6 +930,7 @@ export default function App() {
             uploads={uploads}
             onFileSelected={handleFileSelected}
             onLoadSample={handleLoadSample}
+            onRemoveSurface={handleRemoveSurface}
           />
           <SettingsPanel settings={settings} onChange={setSettings} />
           <BoundaryPanel
