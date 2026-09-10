@@ -14,8 +14,6 @@ import type {
   ViewerBackground,
   SolidMesh,
   HeatmapMode,
-  ReferenceLayer,
-  RefLayerStyle,
 } from './types';
 import { DEFAULT_SETTINGS, SURFACE_ROLES } from './types';
 import { initWasm, runConformance, runConformanceWithBoundaries, parseSurfaces } from './wasm';
@@ -40,9 +38,6 @@ import type { ViewerHandle, SelectionInfo, MeasurePoint, SavedMeasurement } from
 import CrossSectionPanel from './components/CrossSectionPanel';
 import ReportPanel from './components/report/ReportPanel';
 import { computeCrossSection } from './utils/crossSection';
-import { parseOot } from './utils/ootParser';
-import { parseDxf } from './utils/dxfRefParser';
-import { parseArchd } from './utils/archdParser';
 import DomainLegend from './components/DomainLegend';
 import ErrorBanner from './components/ErrorBanner';
 import { classifyEmptyResult, type ClassifiedError } from './utils/errorClassification';
@@ -50,6 +45,12 @@ import { validateSurfaceFile } from './utils/fileValidation';
 import { saveSession, loadSession, clearSession, debounce, type PersistedSession } from './utils/sessionPersistence';
 import RestorePrompt from './components/RestorePrompt';
 import { buildProjectFile, downloadProjectFile, parseProjectFile, ProjectFileParseError } from './utils/projectFile';
+import { useUndoRedo } from './hooks/useUndoRedo';
+import { useReferenceLayers } from './hooks/useReferenceLayers';
+import AppHeader from './components/app/AppHeader';
+import PropertiesPanel from './components/app/PropertiesPanel';
+import ProgressBar from './components/app/ProgressBar';
+import DrawingControlsOverlay from './components/app/DrawingControlsOverlay';
 
 
 function makeSampleUpload(z: number, name: string, role: SurfaceRole, fileName: string, size = 20): UploadedSurface {
@@ -95,13 +96,6 @@ function triSurfaceToUpload(surface: TriSurface, role: SurfaceRole, fileName: st
 
 type MainTab = 'viewer' | 'reports';
 
-
-function formatVolume(v: number): string {
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
-  return v.toFixed(1);
-}
-
 export default function App() {
   const [wasmReady, setWasmReady] = useState(false);
   const [useWorker, setUseWorker] = useState(false);
@@ -140,14 +134,12 @@ export default function App() {
   const [domainMaps, setDomainMaps] = useState<Map<SurfaceRole, Uint8Array>>(new Map());
 
   const [heatmapMode, setHeatmapMode] = useState<HeatmapMode | null>(null);
-  const [refLayers, setRefLayers] = useState<ReferenceLayer[]>([]);
-  const refIdRef = useRef(0);
+  const { refLayers, handleRefDrop, handleRefToggle, handleRefStyleChange, handleRefRemove, resetRefLayers } = useReferenceLayers();
   const [restorableSession, setRestorableSession] = useState<PersistedSession | null>(null);
   // Roles a loaded Project file expects but whose surface data isn't
   // embedded (see projectFile.ts) — keyed by role, valued by the
   // originally-recorded filename shown as a hint, not a hard requirement.
   const [pendingReattachments, setPendingReattachments] = useState<Map<SurfaceRole, string>>(new Map());
-  const loadProjectInputRef = useRef<HTMLInputElement>(null);
 
 
   useEffect(() => {
@@ -253,71 +245,13 @@ export default function App() {
   }, [step, restorableSession, comparisonName, mode, settings, boundaries, uploads, debouncedSave]);
 
   // General undo/redo — scoped to settings, boundary region definitions,
-  // and the background toggle. Deliberately does NOT cover surface
-  // upload/removal (re-parsing large files as part of an undo stack would
-  // be expensive, and Priority 11's remove action is already a deliberate,
-  // confirmed action) or conformance results (recomputing on every undo
-  // step would be surprising and slow). `mode` is excluded too — there's
-  // no in-workspace control that changes it once a comparison is created,
-  // so there's nothing for a user to undo there. This is a single combined
-  // history (one snapshot per meaningfully-different state), not
-  // independent per-field stacks, matching how a person actually thinks
-  // about "undo my last change".
-  interface UndoSnapshot {
-    settings: Settings;
-    boundaries: BoundaryRegion[];
-    background: ViewerBackground;
-  }
-  const undoRedoInFlight = useRef(false);
-  const lastSnapshotRef = useRef<UndoSnapshot>({ settings, boundaries, background });
-  const [undoStack, setUndoStack] = useState<UndoSnapshot[]>([]);
-  const [redoStack, setRedoStack] = useState<UndoSnapshot[]>([]);
-  const UNDO_HISTORY_LIMIT = 50;
-
-  useEffect(() => {
-    const snapshot: UndoSnapshot = { settings, boundaries, background };
-    if (undoRedoInFlight.current) {
-      undoRedoInFlight.current = false;
-      lastSnapshotRef.current = snapshot;
-      return;
-    }
-    const prev = lastSnapshotRef.current;
-    if (JSON.stringify(prev) === JSON.stringify(snapshot)) return; // no real change (e.g. initial mount)
-    setUndoStack((s) => [...s, prev].slice(-UNDO_HISTORY_LIMIT));
-    setRedoStack([]);
-    lastSnapshotRef.current = snapshot;
-  }, [settings, boundaries, background]);
-
-  const applySnapshot = useCallback((s: UndoSnapshot) => {
-    undoRedoInFlight.current = true;
-    setSettings(s.settings);
-    setBoundaries(s.boundaries);
-    setBackground(s.background);
-  }, []);
-
-  // NOTE: deliberately not using a functional setState updater to decide
-  // *whether* to act (e.g. `setUndoStack(stack => { ...side effects...})`)
-  // — React does not guarantee an updater function runs exactly once (it
-  // can re-invoke it, e.g. under StrictMode's double-invoke checks), so
-  // side effects like applySnapshot()/other setState calls inside one can
-  // silently fire more than once. Reading `undoStack`/`redoStack` from the
-  // closure instead (always current, since this callback is recreated
-  // whenever they change) and keeping the actual updater calls pure.
-  const handleUndo = useCallback(() => {
-    if (undoStack.length === 0) return;
-    const target = undoStack[undoStack.length - 1];
-    setRedoStack((r) => [lastSnapshotRef.current, ...r]);
-    setUndoStack((s) => s.slice(0, -1));
-    applySnapshot(target);
-  }, [undoStack, applySnapshot]);
-
-  const handleRedo = useCallback(() => {
-    if (redoStack.length === 0) return;
-    const target = redoStack[0];
-    setUndoStack((s) => [...s, lastSnapshotRef.current]);
-    setRedoStack((r) => r.slice(1));
-    applySnapshot(target);
-  }, [redoStack, applySnapshot]);
+  // and the background toggle. See hooks/useUndoRedo.ts (Priority 19 split
+  // this out of App.tsx; the hook's own comments carry the original design
+  // rationale verbatim — deliberately excludes surface upload/removal,
+  // conformance results, and `mode` from the undo history).
+  const { undoStack, redoStack, handleUndo, handleRedo } = useUndoRedo(
+    settings, boundaries, background, setSettings, setBoundaries, setBackground,
+  );
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -836,76 +770,9 @@ export default function App() {
     });
   }, []);
 
-  const handleRefDrop = useCallback(async (files: FileList) => {
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
-      const id = `ref-${++refIdRef.current}`;
-      const defaultStyle: RefLayerStyle = { color: '#cccccc', opacity: 0.6, wireframe: false, lineWidth: 2, lineDash: [] };
-
-      try {
-        if (ext === '00t') {
-          const buf = await file.arrayBuffer();
-          const parsed = parseOot(buf);
-          setRefLayers(prev => [...prev, {
-            id, fileName: file.name, kind: 'surface', visible: true,
-            style: { ...defaultStyle, color: '#9ca3af' },
-            surface: parsed,
-          }]);
-        } else if (ext === 'dxf') {
-          const text = await file.text();
-          const parsed = parseDxf(text);
-          if (parsed.surfaces.length > 0) {
-            for (const surf of parsed.surfaces) {
-              const sid = `ref-${++refIdRef.current}`;
-              setRefLayers(prev => [...prev, {
-                id: sid, fileName: file.name, kind: 'surface', visible: true,
-                style: { ...defaultStyle, color: '#9ca3af' },
-                surface: surf,
-              }]);
-            }
-          }
-          if (parsed.polylines.length > 0) {
-            setRefLayers(prev => [...prev, {
-              id, fileName: file.name, kind: 'lines', visible: true,
-              style: defaultStyle,
-              polylines: parsed.polylines.map(p => ({
-                points: p.points, pointCount: p.pointCount, closed: p.closed,
-                color: p.color, layer: p.layer, name: p.layer || file.name,
-              })),
-            }]);
-          }
-        } else if (ext === 'arch_d') {
-          const text = await file.text();
-          const parsed = parseArchd(text);
-          if (parsed.polylines.length > 0) {
-            setRefLayers(prev => [...prev, {
-              id, fileName: file.name, kind: 'lines', visible: true,
-              style: defaultStyle,
-              polylines: parsed.polylines.map(p => ({
-                points: p.points, pointCount: p.pointCount, closed: p.closed,
-                color: p.color, layer: p.group || p.feature, name: p.name || p.feature,
-              })),
-            }]);
-          }
-        }
-      } catch (err) {
-        console.error(`Failed to parse reference file ${file.name}:`, err);
-      }
-    }
-  }, []);
-
-  const handleRefToggle = useCallback((id: string) => {
-    setRefLayers(prev => prev.map(l => l.id === id ? { ...l, visible: !l.visible } : l));
-  }, []);
-
-  const handleRefStyleChange = useCallback((id: string, style: RefLayerStyle) => {
-    setRefLayers(prev => prev.map(l => l.id === id ? { ...l, style } : l));
-  }, []);
-
-  const handleRefRemove = useCallback((id: string) => {
-    setRefLayers(prev => prev.filter(l => l.id !== id));
-  }, []);
+  // Reference layers (dropped .00t/.dxf/.arch_d overlays) — see
+  // hooks/useReferenceLayers.ts (Priority 19 split this self-contained
+  // feature out of App.tsx; no logic changed).
 
   const crossSectionData = useMemo(() => {
     if (!sectionLine || !result) return null;
@@ -987,228 +854,49 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden">
-      {/* Progress bar */}
-      {(progress || isRunning) && (
-        <div className="absolute left-0 right-0 top-11 z-50 h-1 bg-slate-800">
-          <div
-            className="h-full bg-indigo-500 transition-all duration-300"
-            style={{ width: progress ? `${Math.max(progress.value * 100, 5)}%` : '100%' }}
-          />
-          {progress && (
-            <div className="absolute left-1/2 top-1.5 -translate-x-1/2 rounded bg-slate-900/90 px-2 py-0.5 text-[10px] text-slate-300">
-              {progress.phase === 'parsing' && 'Parsing surface...'}
-              {progress.phase === 'converting' && 'Preparing data...'}
-              {progress.phase === 'conformance' && 'Running conformance...'}
-              {progress.phase === 'transferring' && 'Transferring results...'}
-              {progress.phase === 'Preparing surfaces' && 'Preparing surfaces...'}
-              {progress.phase === 'Computing conformance' && 'Computing conformance...'}
-              {progress.phase === 'Transferring results' && 'Transferring results...'}
-            </div>
-          )}
-        </div>
-      )}
+      <ProgressBar progress={progress} isRunning={isRunning} />
 
-      {/* Header */}
-      <header className="flex h-11 flex-shrink-0 items-center justify-between border-b border-slate-700 bg-slate-900 px-3">
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => {
-              setStep('landing');
-              setResult(null);
-              setFlatDomains([]);
-              setDomainMaps(new Map());
-              setHeatmapMode(null);
-              setRefLayers([]);
-              setUploads(new Map());
-              setBoundaries([]);
-              setMainTab('viewer');
-              setSectionLine(null);
-              setIsDrawingSection(false);
-              setMeasureTool('none');
-              setMeasurePoints([]);
-              setSelectedId(null);
-              setSelectionInfo(null);
-              if (useWorker) workerClearSurfaces();
-            }}
-            className="text-sm text-slate-500 transition-colors hover:text-slate-300"
-          >
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-            </svg>
-          </button>
-          <h1 className="text-sm font-semibold text-slate-200">{comparisonName}</h1>
-          <span
-            className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-              mode === 'dig'
-                ? 'bg-amber-900/50 text-amber-400'
-                : 'bg-emerald-900/50 text-emerald-400'
-            }`}
-          >
-            {mode}
-          </span>
-          <div className="ml-2 flex items-center gap-1 border-l border-slate-700 pl-2">
-            <button
-              type="button"
-              onClick={handleUndo}
-              disabled={undoStack.length === 0}
-              title="Undo (Ctrl/Cmd+Z) — settings, boundaries, background"
-              className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:pointer-events-none disabled:opacity-30"
-            >
-              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L4 10m0 0l5-5m-5 5h11a4 4 0 010 8h-1" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              onClick={handleRedo}
-              disabled={redoStack.length === 0}
-              title="Redo (Ctrl/Cmd+Shift+Z)"
-              className="mr-1 rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:pointer-events-none disabled:opacity-30"
-            >
-              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 15l5-5m0 0l-5-5m5 5H9a4 4 0 000 8h1" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              onClick={handleSaveProject}
-              title="Save Project — download a file capturing settings, roles, and boundaries (not the surface data itself)"
-              className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"
-            >
-              Save Project
-            </button>
-            <button
-              type="button"
-              onClick={() => loadProjectInputRef.current?.click()}
-              title="Load Project — restore settings/roles/boundaries from a saved project file, then re-attach surface files"
-              className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"
-            >
-              Load Project
-            </button>
-            <input
-              ref={loadProjectInputRef}
-              type="file"
-              accept=".json"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) handleLoadProjectFile(file);
-                e.target.value = '';
-              }}
-            />
-          </div>
-        </div>
-
-        {/* Toolbar */}
-        {result && mainTab === 'viewer' && (
-          <div className="flex items-center gap-1">
-            {/* Background toggle */}
-            <button
-              type="button"
-              onClick={() => setBackground(b => b === 'dark' ? 'light' : 'dark')}
-              className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"
-              title={`Background: ${background}`}
-            >
-              {background === 'dark' ? (
-                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-                </svg>
-              ) : (
-                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-                </svg>
-              )}
-            </button>
-
-            <div className="mx-1 h-4 w-px bg-slate-700" />
-
-            {/* Measure tools */}
-            <div className="flex items-center gap-0.5 rounded bg-slate-800 p-0.5">
-              <button
-                type="button"
-                onClick={() => handleMeasureToolChange(measureTool === 'distance' ? 'none' : 'distance')}
-                className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
-                  measureTool === 'distance' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
-                }`}
-                title="Measure distance (click two points)"
-              >
-                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M2 17l3-3 2 2 3-3 2 2 3-3 2 2 3-3 2 2 1-1V7L20 5 5 20H2v-3z" />
-                </svg>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleMeasureToolChange(measureTool === 'area' ? 'none' : 'area')}
-                className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
-                  measureTool === 'area' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
-                }`}
-                title="Measure area"
-              >
-                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5z" />
-                </svg>
-              </button>
-              {savedMeasurements.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => { setSavedMeasurements([]); setMeasurePoints([]); }}
-                  className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white transition-colors"
-                  title="Clear all measurements"
-                >
-                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
-                </button>
-              )}
-            </div>
-
-            <div className="mx-1 h-4 w-px bg-slate-700" />
-
-            {/* Section tools */}
-            {isDrawingSection ? (
-              <button
-                type="button"
-                onClick={() => setIsDrawingSection(false)}
-                className="rounded bg-amber-600 px-2 py-1 text-[10px] font-medium text-white hover:bg-amber-500"
-              >
-                Cancel
-              </button>
-            ) : sectionLine ? (
-              <button
-                type="button"
-                onClick={handleClearSection}
-                className="rounded px-2 py-1 text-[10px] font-medium text-amber-400 hover:bg-slate-700"
-              >
-                ✂ Clear Section
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleStartSection}
-                className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white"
-                title="Cross Section"
-              >
-                ✂ Section
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={handleCapture}
-              className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-slate-700 hover:text-white"
-              title="Capture View"
-            >
-              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-            </button>
-
-
-          </div>
-        )}
-      </header>
+      <AppHeader
+        comparisonName={comparisonName}
+        mode={mode}
+        onBack={() => {
+          setStep('landing');
+          setResult(null);
+          setFlatDomains([]);
+          setDomainMaps(new Map());
+          setHeatmapMode(null);
+          resetRefLayers();
+          setUploads(new Map());
+          setBoundaries([]);
+          setMainTab('viewer');
+          setSectionLine(null);
+          setIsDrawingSection(false);
+          setMeasureTool('none');
+          setMeasurePoints([]);
+          setSelectedId(null);
+          setSelectionInfo(null);
+          if (useWorker) workerClearSurfaces();
+        }}
+        canUndo={undoStack.length > 0}
+        canRedo={redoStack.length > 0}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        onSaveProject={handleSaveProject}
+        onLoadProjectFile={handleLoadProjectFile}
+        showToolbar={!!result && mainTab === 'viewer'}
+        background={background}
+        onToggleBackground={() => setBackground(b => b === 'dark' ? 'light' : 'dark')}
+        measureTool={measureTool}
+        onMeasureToolChange={handleMeasureToolChange}
+        savedMeasurementCount={savedMeasurements.length}
+        onClearMeasurements={() => { setSavedMeasurements([]); setMeasurePoints([]); }}
+        isDrawingSection={isDrawingSection}
+        onCancelSection={() => setIsDrawingSection(false)}
+        sectionLineActive={!!sectionLine}
+        onClearSection={handleClearSection}
+        onStartSection={handleStartSection}
+        onCapture={handleCapture}
+      />
 
       {/* Body */}
       <div className="flex flex-1 overflow-hidden">
@@ -1423,122 +1111,21 @@ export default function App() {
 
           {/* Properties panel */}
           {selectionInfo && mainTab === 'viewer' && (
-            <div className="flex w-56 flex-shrink-0 flex-col border-l border-slate-700 bg-slate-900 text-slate-200">
-              <div className="flex items-center justify-between border-b border-slate-700 px-3 py-2">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Properties</span>
-                <button
-                  type="button"
-                  onClick={() => { setSelectedId(null); setSelectionInfo(null); }}
-                  className="rounded p-0.5 text-slate-500 hover:bg-slate-800 hover:text-slate-300"
-                >
-                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-              <div className="flex-1 overflow-y-auto p-3 space-y-3">
-                <div>
-                  <div className="text-[10px] text-slate-500 uppercase tracking-wide">Type</div>
-                  <div className="text-xs font-medium">{selectionInfo.type === 'domain' ? 'Conformance Solid' : 'Input Surface'}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] text-slate-500 uppercase tracking-wide">Name</div>
-                  <div className="text-xs font-medium">{selectionInfo.label}</div>
-                </div>
-                {selectionInfo.volume !== undefined && selectionInfo.volume > 0 && (
-                  <div>
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Volume</div>
-                    <div className="text-xs font-mono">{formatVolume(selectionInfo.volume)} m³</div>
-                  </div>
-                )}
-                {selectionInfo.blockName && (
-                  <div>
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Block</div>
-                    <div className="text-xs font-medium">{selectionInfo.blockName}</div>
-                  </div>
-                )}
-                {selectionInfo.domain && (
-                  <div>
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Domain</div>
-                    <div className="text-xs font-medium">{selectionInfo.domain}</div>
-                  </div>
-                )}
-                {selectionInfo.surfaceFileName && (
-                  <div>
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">File</div>
-                    <div className="text-xs font-mono truncate">{selectionInfo.surfaceFileName}</div>
-                  </div>
-                )}
-                {selectionInfo.surfaceRole && (
-                  <div>
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Role</div>
-                    <div className="text-xs font-medium">
-                      {SURFACE_ROLES.find((r) => r.key === selectionInfo.surfaceRole)?.label ?? selectionInfo.surfaceRole}
-                    </div>
-                  </div>
-                )}
-                {selectionInfo.vertexCount !== undefined && (
-                  <div>
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Vertices</div>
-                    <div className="text-xs font-mono">{selectionInfo.vertexCount.toLocaleString()}</div>
-                  </div>
-                )}
-                {selectionInfo.triangleCount !== undefined && (
-                  <div>
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">Triangles</div>
-                    <div className="text-xs font-mono">{selectionInfo.triangleCount.toLocaleString()}</div>
-                  </div>
-                )}
-                {selectionInfo.bbox && (
-                  <div>
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-0.5">Bounding Box</div>
-                    <div className="grid grid-cols-[auto_1fr_1fr] gap-x-1.5 gap-y-0.5 text-[10px] font-mono">
-                      <span className="text-slate-500">E</span>
-                      <span className="text-slate-300">{selectionInfo.bbox.minX.toFixed(1)}</span>
-                      <span className="text-slate-300">{selectionInfo.bbox.maxX.toFixed(1)}</span>
-                      <span className="text-slate-500">N</span>
-                      <span className="text-slate-300">{selectionInfo.bbox.minY.toFixed(1)}</span>
-                      <span className="text-slate-300">{selectionInfo.bbox.maxY.toFixed(1)}</span>
-                      <span className="text-slate-500">RL</span>
-                      <span className="text-slate-300">{selectionInfo.bbox.minZ.toFixed(1)}</span>
-                      <span className="text-slate-300">{selectionInfo.bbox.maxZ.toFixed(1)}</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
+            <PropertiesPanel
+              selectionInfo={selectionInfo}
+              onClose={() => { setSelectedId(null); setSelectionInfo(null); }}
+            />
           )}
         </main>
       </div>
 
-      {/* Drawing controls overlay */}
-      {isDrawing && (
-        <div className="absolute bottom-6 left-1/2 z-50 flex -translate-x-1/2 gap-2 rounded-lg bg-slate-900/90 px-4 py-2 shadow-xl">
-          <button
-            type="button"
-            onClick={() => setDrawPoints((p) => p.slice(0, -1))}
-            disabled={drawPoints.length === 0}
-            className="rounded bg-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-600 disabled:opacity-40"
-          >
-            Undo
-          </button>
-          <button
-            type="button"
-            onClick={finishDrawing}
-            disabled={drawPoints.length < 3}
-            className="rounded bg-indigo-600 px-3 py-1 text-xs text-white hover:bg-indigo-500 disabled:opacity-40"
-          >
-            Close Polygon
-          </button>
-          <button
-            type="button"
-            onClick={cancelDrawing}
-            className="rounded bg-red-600/80 px-3 py-1 text-xs text-white hover:bg-red-500"
-          >
-            Cancel
-          </button>
-        </div>
-      )}
+      <DrawingControlsOverlay
+        isDrawing={isDrawing}
+        drawPointCount={drawPoints.length}
+        onUndoLastPoint={() => setDrawPoints((p) => p.slice(0, -1))}
+        onFinish={finishDrawing}
+        onCancel={cancelDrawing}
+      />
 
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
     </div>
