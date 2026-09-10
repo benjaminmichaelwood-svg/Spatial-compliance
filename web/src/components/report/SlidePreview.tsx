@@ -91,21 +91,32 @@ function DomainVolumeTable({ slide, dv }: { slide: SlideData; dv: PitDomainVolum
   );
 }
 
+// Priority R5: shared image-or-placeholder box, used by both the viewer
+// pane and the cross-section pane of PitReportSlideContent below — one
+// visual convention for "no image yet" in the live preview, matching
+// addImageOrPlaceholder's equivalent role in the exported deck.
+function ImageOrPlaceholderBox({ src, alt, placeholder, children }: { src: string | null; alt: string; placeholder: string; children?: React.ReactNode }) {
+  return (
+    <div className="relative flex-1 overflow-hidden rounded-lg bg-slate-100">
+      {src ? (
+        <img src={src} alt={alt} className="h-full w-full object-contain" />
+      ) : (
+        <div className="flex h-full items-center justify-center text-sm text-slate-400">
+          {placeholder}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+}
+
+// Priority R5: still used for the site-wide 'summary-viewer' slide, which
+// keeps its own existing two-slide (viewer + waterfall) pattern — per-pit
+// slides moved to PitReportSlideContent below.
 function ViewerSlideContent({ slide, templateTheme }: { slide: SlideData; templateTheme?: TemplateTheme | null }) {
   return (
     <div className="flex h-full w-full gap-3 overflow-y-auto p-4">
-      <div className="relative flex-1 overflow-hidden rounded-lg bg-slate-100">
-        {slide.viewerScreenshot ? (
-          <img
-            src={slide.viewerScreenshot}
-            alt="3D View"
-            className="h-full w-full object-contain"
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center text-sm text-slate-400">
-            3D Viewer Screenshot
-          </div>
-        )}
+      <ImageOrPlaceholderBox src={slide.viewerScreenshot} alt="3D View" placeholder="3D Viewer Screenshot">
         {templateTheme?.logoDataUrl && (
           <img
             src={templateTheme.logoDataUrl}
@@ -113,7 +124,7 @@ function ViewerSlideContent({ slide, templateTheme }: { slide: SlideData; templa
             className="absolute right-2 top-2 h-8 max-w-[35%] object-contain drop-shadow"
           />
         )}
-      </div>
+      </ImageOrPlaceholderBox>
       <div className="flex w-44 flex-shrink-0 flex-col items-center gap-3">
         <DonutGauge value={slide.conformancePct} label="Conformance" mode="conformance" />
         <DonutGauge
@@ -136,7 +147,6 @@ function ViewerSlideContent({ slide, templateTheme }: { slide: SlideData; templa
             <div className="text-[11px] font-semibold text-slate-700">{formatVol(slide.plannedVol - slide.actualVol)}</div>
           </div>
         </div>
-        {slide.domainVolumes && <DomainVolumeTable slide={slide} dv={slide.domainVolumes} />}
       </div>
     </div>
   );
@@ -150,25 +160,73 @@ function WaterfallSlideContent({ slide }: { slide: SlideData }) {
   );
 }
 
-// Priority R3: same image-or-placeholder pattern as ViewerSlideContent's
-// own screenshot handling, so a pit with no saved cross-section (Priority
-// R2) never renders blank in the live preview either — matches
-// addCrossSectionSlide's graceful placeholder in the exported deck exactly.
-function CrossSectionSlideContent({ slide }: { slide: SlideData }) {
+// Priority R5: consolidated per-pit slide, live-preview equivalent of
+// addPitReportSlide in pptxReport.tsx — same reference layout named in the
+// task (viewer+gauges share the top, waterfall a prominent middle band,
+// cross-section+table share the bottom), same source data
+// (slide.viewerScreenshot/domains/crossSectionImage/domainVolumes), so it
+// cannot show different numbers or images than the exported deck. The
+// container scrolls (overflow-y-auto) since stacking five pieces of
+// content vertically can exceed the panel's fixed height at some viewport
+// sizes — unlike the export, where positions are fixed inches on a fixed
+// page size, the live preview has no such hard ceiling to design around.
+function PitReportSlideContent({ slide, templateTheme }: { slide: SlideData; templateTheme?: TemplateTheme | null }) {
   return (
-    <div className="flex h-full w-full p-4">
-      <div className="relative flex-1 overflow-hidden rounded-lg bg-slate-100">
-        {slide.crossSectionImage ? (
-          <img
-            src={slide.crossSectionImage}
-            alt="Cross Section"
-            className="h-full w-full object-contain"
+    <div className="flex h-full w-full flex-col gap-3 overflow-y-auto p-4">
+      {/* Top: viewer image + gauges/KPIs. No fixed row height — the two
+          160px DonutGauges plus KPI text need ~400px, so the row (and the
+          image box beside it, via flex's default align-items:stretch)
+          sizes to whatever that column naturally needs rather than a
+          guessed height that clips or leaves gaps. */}
+      <div className="flex flex-shrink-0 gap-3">
+        <ImageOrPlaceholderBox src={slide.viewerScreenshot} alt="3D View" placeholder="3D Viewer Screenshot">
+          {templateTheme?.logoDataUrl && (
+            <img
+              src={templateTheme.logoDataUrl}
+              alt="Template logo"
+              className="absolute right-2 top-2 h-8 max-w-[35%] object-contain drop-shadow"
+            />
+          )}
+        </ImageOrPlaceholderBox>
+        <div className="flex w-44 flex-shrink-0 flex-col items-center gap-3">
+          <DonutGauge value={slide.conformancePct} label="Conformance" mode="conformance" />
+          <DonutGauge
+            value={slide.productionPct}
+            label="Production"
+            mode="production"
+            accentColor={templateTheme ? `#${templateTheme.accentColor}` : undefined}
           />
-        ) : (
-          <div className="flex h-full items-center justify-center text-sm text-slate-400">
-            No cross-section defined for this area
+          <div className="grid w-full grid-cols-3 gap-1 text-center">
+            <div>
+              <div className="text-[9px] text-slate-400">Planned</div>
+              <div className="text-[11px] font-semibold text-slate-700">{formatVol(slide.plannedVol)}</div>
+            </div>
+            <div>
+              <div className="text-[9px] text-slate-400">Actual</div>
+              <div className="text-[11px] font-semibold text-slate-700">{formatVol(slide.actualVol)}</div>
+            </div>
+            <div>
+              <div className="text-[9px] text-slate-400">Net</div>
+              <div className="text-[11px] font-semibold text-slate-700">{formatVol(slide.plannedVol - slide.actualVol)}</div>
+            </div>
           </div>
-        )}
+        </div>
+      </div>
+
+      {/* Middle: waterfall, prominent */}
+      <div className="flex-shrink-0 rounded-lg border border-slate-100 p-2">
+        <WaterfallChart domains={slide.domains} mode={slide.mode} />
+      </div>
+
+      {/* Bottom: cross-section + data table. Same natural-height reasoning
+          as the top row — the table's own row count (11 domain rows + 2
+          percentage rows) determines the height, and the image box
+          stretches to match it. */}
+      <div className="flex flex-shrink-0 gap-3">
+        <ImageOrPlaceholderBox src={slide.crossSectionImage} alt="Cross Section" placeholder="No cross-section defined for this area" />
+        <div className="w-52 flex-shrink-0">
+          {slide.domainVolumes && <DomainVolumeTable slide={slide} dv={slide.domainVolumes} />}
+        </div>
       </div>
     </div>
   );
@@ -264,10 +322,10 @@ export default function SlidePreview({ slides, onReorder, onRemove, templateThem
           {activeSlide && (
             activeSlide.type === 'definitions'
               ? <DefinitionsSlideContent slide={activeSlide} />
-              : activeSlide.type === 'pit-viewer' || activeSlide.type === 'summary-viewer'
-                ? <ViewerSlideContent slide={activeSlide} templateTheme={templateTheme} />
-                : activeSlide.type === 'pit-section'
-                  ? <CrossSectionSlideContent slide={activeSlide} />
+              : activeSlide.type === 'pit-report'
+                ? <PitReportSlideContent slide={activeSlide} templateTheme={templateTheme} />
+                : activeSlide.type === 'summary-viewer'
+                  ? <ViewerSlideContent slide={activeSlide} templateTheme={templateTheme} />
                   : <WaterfallSlideContent slide={activeSlide} />
           )}
         </div>
@@ -323,10 +381,10 @@ export default function SlidePreview({ slides, onReorder, onRemove, templateThem
                 <span className="text-[7px] text-slate-400">
                   {slide.type === 'definitions'
                     ? 'Definitions'
-                    : slide.type.includes('viewer')
-                      ? '3D View'
-                      : slide.type === 'pit-section'
-                        ? 'Cross Section'
+                    : slide.type === 'pit-report'
+                      ? 'Pit Report'
+                      : slide.type === 'summary-viewer'
+                        ? '3D View'
                         : 'Waterfall'}
                 </span>
               </button>

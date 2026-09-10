@@ -28,7 +28,13 @@ export interface PitDomainVolumes {
 
 export interface SlideData {
   id: string;
-  type: 'definitions' | 'pit-viewer' | 'pit-waterfall' | 'pit-section' | 'summary-viewer' | 'summary-waterfall';
+  // Priority R5: per-pit slides consolidated from three separate types
+  // ('pit-viewer' + 'pit-waterfall' + 'pit-section', one per boundary) into
+  // one dense 'pit-report' type carrying everything those three used to
+  // split across separate slides. Site-summary slides are explicitly left
+  // as the existing two-slide ('summary-viewer' + 'summary-waterfall')
+  // pattern for now, per this item's own scope.
+  type: 'definitions' | 'pit-report' | 'summary-viewer' | 'summary-waterfall';
   title: string;
   subtitle: string;
   pitName?: string;
@@ -39,13 +45,13 @@ export interface SlideData {
   plannedVol: number;
   actualVol: number;
   viewerScreenshot: string | null;
-  // Priority R3: set only on 'pit-section' slides, from ReportPanel.tsx's
-  // capture pass over each pit's saved cross-section (Priority R2). null
-  // means no saved cross-section exists for this pit — addCrossSectionSlide
-  // renders a graceful placeholder rather than leaving the slide blank.
+  // Priority R3: from ReportPanel.tsx's capture pass over each pit's saved
+  // cross-section (Priority R2). null means no saved cross-section exists
+  // for this pit — addPitReportSlide renders a graceful placeholder rather
+  // than leaving that part of the slide blank.
   crossSectionImage: string | null;
-  // Priority R4: set only on 'pit-viewer' slides — the data table renders
-  // alongside the existing gauges/KPIs there. null everywhere else.
+  // Priority R4: set only on 'pit-report' slides — the data table renders
+  // alongside the gauges/KPIs there. null everywhere else.
   domainVolumes: PitDomainVolumes | null;
 }
 
@@ -328,48 +334,48 @@ function addViewerSlide(
     });
   });
 
-  // Priority R4: compact per-domain data table, in the unused space below
-  // the existing gauges/KPIs — those are left completely unchanged per
-  // this item's own constraint, this only adds to the slide, never
-  // replaces anything on it. Only present on pit-viewer slides
-  // (data.domainVolumes is null for summary-viewer).
-  if (data.domainVolumes) {
-    const tableY = 4.3;
-    const rowH = 0.22;
-    const tableRows = buildDomainTableRows(data.mode, data.domainVolumes);
-    slide.addTable(tableRows, {
-      x: 7.3, y: tableY, w: 5.6,
-      colW: [0.18, 3.6, 1.82],
-      border: { type: 'solid', pt: 0.5, color: 'E2E2DD' },
-      rowH,
-      margin: [1, 3, 1, 3],
-      autoPage: false,
-    } as any);
-
-    // Plan Compliance % / Plan Performance % — these ARE
-    // data.conformancePct/data.productionPct (the exact same numbers the
-    // two donut gauges above already show), not a separate definition —
-    // confirmed against classify.rs's formulas before implementing this
-    // item (see CLAUDE.md's R4 notes).
-    const pctY = tableY + tableRows.length * rowH + 0.08;
-    const pctRows = [
-      { label: 'Plan Compliance %', value: data.conformancePct },
-      { label: 'Plan Performance %', value: data.productionPct },
-    ];
-    pctRows.forEach((r, i) => {
-      const ry = pctY + i * 0.26;
-      slide.addText(r.label, {
-        x: 7.3, y: ry, w: 3.6, h: 0.22,
-        fontSize: 7.5, color: '898781',
-      });
-      slide.addText(`${r.value.toFixed(1)}%`, {
-        x: 10.9, y: ry, w: 2.0, h: 0.22,
-        fontSize: 7.5, bold: true, color: '333333', align: 'right',
-      });
-    });
-  }
-
+  // Priority R5: this function is now only used for the site-wide
+  // 'summary-viewer' slide (per-pit slides moved to the consolidated
+  // addPitReportSlide below) — summary-viewer's domainVolumes is always
+  // null (Priority R4 only populates it for per-pit data), so the
+  // domain-volume table this function used to conditionally add here has
+  // been removed as dead code for this caller, not silently dropped
+  // functionality: see addPitReportSlide for where that table now lives.
   return slide;
+}
+
+// Priority R4/R5: adds the Plan Compliance %/Plan Performance % text rows
+// directly below a just-added domain-volume table, reused by
+// addPitReportSlide. `tableRows` is the exact array passed to addTable so
+// the vertical offset always matches the table's real row count. `x`/`w`
+// describe the same horizontal span the table itself occupies — the label
+// takes the left ~65% of it, the value right-aligned in the remainder.
+function addComplianceRows(
+  slide: PptxGenJS.Slide,
+  data: SlideData,
+  tableRows: any[][],
+  tableY: number,
+  rowH: number,
+  x: number,
+  w: number,
+) {
+  const labelW = w * 0.65;
+  const pctY = tableY + tableRows.length * rowH + 0.08;
+  const pctRows = [
+    { label: 'Plan Compliance %', value: data.conformancePct },
+    { label: 'Plan Performance %', value: data.productionPct },
+  ];
+  pctRows.forEach((r, i) => {
+    const ry = pctY + i * 0.26;
+    slide.addText(r.label, {
+      x, y: ry, w: labelW, h: 0.22,
+      fontSize: 7.5, color: '898781',
+    });
+    slide.addText(`${r.value.toFixed(1)}%`, {
+      x: x + labelW, y: ry, w: w - labelW, h: 0.22,
+      fontSize: 7.5, bold: true, color: '333333', align: 'right',
+    });
+  });
 }
 
 async function addWaterfallSlide(
@@ -394,41 +400,120 @@ async function addWaterfallSlide(
   return slide;
 }
 
-// Priority R3: cross-section slide for a pit — image-or-placeholder,
-// mirroring addViewerSlide's exact same pattern for its own screenshot
-// (same box proportions, same placeholder styling) rather than inventing a
-// new visual convention for "we don't have an image for this yet".
-function addCrossSectionSlide(
+// Priority R5: image-or-placeholder helper shared by the viewer and
+// cross-section panes of addPitReportSlide (and, before this item, by
+// addViewerSlide's own screenshot and the old standalone
+// addCrossSectionSlide) — one visual convention for "we don't have an
+// image for this yet" everywhere it's needed, not a new one per pane.
+function addImageOrPlaceholder(
+  slide: PptxGenJS.Slide,
+  imageData: string | null,
+  placeholderText: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+) {
+  if (imageData) {
+    slide.addImage({ data: imageData, x, y, w, h });
+  } else {
+    slide.addShape('rect' as any, { x, y, w, h, fill: { color: 'F1F5F9' } } as any);
+    slide.addText(placeholderText, {
+      x, y: y + h / 2 - 0.4, w, h: 0.8,
+      fontSize: 12, color: '94A3B8', align: 'center', valign: 'middle',
+    });
+  }
+}
+
+// Priority R5: consolidates the three previous per-pit slides
+// (pit-viewer, pit-waterfall, pit-section) into one dense slide — the
+// reference layout named in the task: viewer+gauges share the top, the
+// waterfall takes a prominent middle band, cross-section+data table share
+// the bottom. Per-domain volume/percentage calculations are completely
+// untouched (still `data.conformancePct`/`productionPct`/`plannedVol`/
+// `actualVol`/`domainVolumes`, exactly as buildSlides already computed
+// them) — this function only rearranges how the same numbers/images are
+// laid out on the page. Site-summary slides are deliberately NOT
+// consolidated here (see buildSlides/generatePPTX) — they stay on the
+// existing addViewerSlide/addWaterfallSlide two-slide pattern, per this
+// item's own scope.
+async function addPitReportSlide(
   pptx: PptxGenJS,
   data: SlideData,
   templateLayout?: string,
+  templateTheme?: TemplateTheme | null,
 ) {
   const opts: any = templateLayout ? { masterName: templateLayout } : {};
   const slide = pptx.addSlide(opts);
 
   slide.addText(data.title, {
-    x: 0.4, y: 0.2, w: 12, h: 0.4,
-    fontSize: 18, bold: true, color: '1a1a19',
+    x: 0.4, y: 0.08, w: 9, h: 0.32,
+    fontSize: 16, bold: true, color: '1a1a19',
   });
   slide.addText(data.subtitle, {
-    x: 0.4, y: 0.55, w: 12, h: 0.3,
-    fontSize: 10, color: '898781',
+    x: 0.4, y: 0.38, w: 9, h: 0.22,
+    fontSize: 9, color: '898781',
   });
 
-  if (data.crossSectionImage) {
-    slide.addImage({
-      data: data.crossSectionImage,
-      x: 0.5, y: 1.0, w: 12.3, h: 5.8,
+  // --- Top band: viewer image + gauges + KPIs ---
+  const topY = 0.62;
+  const topH = 1.93;
+  addImageOrPlaceholder(slide, data.viewerScreenshot, '3D Viewer Screenshot', 0.3, topY, 6.6, topH);
+
+  const donutSize = 0.85;
+  addDonutToSlide(slide, data.conformancePct, 'Conformance', statusColor(data.conformancePct), 7.1, topY, donutSize);
+  addDonutToSlide(slide, data.productionPct, 'Production', templateTheme?.accentColor ?? '2a78d6', 8.15, topY, donutSize);
+
+  const kpiY = topY + donutSize + 0.3;
+  const kpis = [
+    { label: 'Planned', value: `${formatVol(data.plannedVol)} m³` },
+    { label: 'Actual', value: `${formatVol(data.actualVol)} m³` },
+    { label: 'Net', value: `${formatVol(data.plannedVol - data.actualVol)} m³` },
+  ];
+  kpis.forEach((kpi, i) => {
+    const kx = 9.3 + i * 1.25;
+    slide.addText(kpi.label, {
+      x: kx, y: kpiY, w: 1.2, h: 0.2,
+      fontSize: 7, color: '898781',
     });
-  } else {
-    slide.addShape('rect' as any, {
-      x: 0.5, y: 1.0, w: 12.3, h: 5.8,
-      fill: { color: 'F1F5F9' },
+    slide.addText(kpi.value, {
+      x: kx, y: kpiY + 0.2, w: 1.2, h: 0.25,
+      fontSize: 9, bold: true, color: '333333',
+    });
+  });
+
+  // --- Middle band: waterfall, prominent and full-width ---
+  const midY = 2.65;
+  const midH = 2.2;
+  const midX = 0.3;
+  const midW = 12.7;
+  const midRenderW = Math.round(320 * (midW / midH));
+  const { dataUrl: waterfallUrl } = await renderComponentToImage(
+    <WaterfallChart domains={data.domains} mode={data.mode} />,
+    midRenderW,
+  );
+  slide.addImage({ data: waterfallUrl, x: midX, y: midY, w: midW, h: midH });
+
+  // --- Bottom band: cross-section + data table ---
+  const botY = 4.95;
+  const botH = 2.4;
+  addImageOrPlaceholder(slide, data.crossSectionImage, 'No cross-section defined for this area', 0.3, botY, 7.0, botH);
+
+  if (data.domainVolumes) {
+    const tableX = 7.5;
+    const tableW = 5.5;
+    const rowH = 0.17;
+    const tableRows = buildDomainTableRows(data.mode, data.domainVolumes);
+    slide.addTable(tableRows, {
+      x: tableX, y: botY, w: tableW,
+      colW: [0.18, tableW - 0.18 - 1.7, 1.7],
+      border: { type: 'solid', pt: 0.5, color: 'E2E2DD' },
+      rowH,
+      margin: [1, 3, 1, 3],
+      autoPage: false,
     } as any);
-    slide.addText('No cross-section defined for this area', {
-      x: 0.5, y: 3.6, w: 12.3, h: 1,
-      fontSize: 14, color: '94A3B8', align: 'center',
-    });
+
+    addComplianceRows(slide, data, tableRows, botY, rowH, tableX, tableW);
   }
 
   return slide;
@@ -496,9 +581,15 @@ export function buildSlides(
     const confPct = planned > 0 ? (confVol / planned) * 100 : 0;
     const prodPct = planned > 0 ? (actual / planned) * 100 : 0;
 
+    // Priority R5: one consolidated 'pit-report' slide per pit, replacing
+    // the previous pit-viewer/pit-waterfall/pit-section trio — carries
+    // everything those three used to split across separate slides.
+    // Per-domain volume/percentage values are exactly what they always
+    // were (confPct/prodPct/planned/actual computed above, untouched by
+    // this item).
     slides.push({
-      id: `pit-viewer-${i}`,
-      type: 'pit-viewer',
+      id: `pit-report-${i}`,
+      type: 'pit-report',
       title: b.name,
       subtitle: `${mode.toUpperCase()} mode · ${comparisonName}`,
       pitName: b.name,
@@ -509,46 +600,12 @@ export function buildSlides(
       plannedVol: planned,
       actualVol: actual,
       viewerScreenshot: pitScreenshots.get(b.name) ?? null,
-      crossSectionImage: null,
+      crossSectionImage: pitCrossSectionImages.get(b.name) ?? null,
       // Priority R4: the exact per-domain volumes already computed above
       // to derive planned/actual/confPct/prodPct — captured instead of
       // discarded so the data table shows the same numbers those fields
       // are built from, not a re-derivation.
       domainVolumes: { confVol, pnmVol, mbsVol, mnpVol, psdVol, aopVol, planned, actual },
-    });
-
-    slides.push({
-      id: `pit-waterfall-${i}`,
-      type: 'pit-waterfall',
-      title: `${b.name} — Waterfall`,
-      subtitle: `${mode.toUpperCase()} mode · ${comparisonName}`,
-      pitName: b.name,
-      domains: pitDomains,
-      mode,
-      conformancePct: confPct,
-      productionPct: prodPct,
-      plannedVol: planned,
-      actualVol: actual,
-      viewerScreenshot: null,
-      crossSectionImage: null,
-      domainVolumes: null,
-    });
-
-    slides.push({
-      id: `pit-section-${i}`,
-      type: 'pit-section',
-      title: `${b.name} — Cross Section`,
-      subtitle: `${mode.toUpperCase()} mode · ${comparisonName}`,
-      pitName: b.name,
-      domains: pitDomains,
-      mode,
-      conformancePct: confPct,
-      productionPct: prodPct,
-      plannedVol: planned,
-      actualVol: actual,
-      viewerScreenshot: null,
-      crossSectionImage: pitCrossSectionImages.get(b.name) ?? null,
-      domainVolumes: null,
     });
   }
 
@@ -636,10 +693,10 @@ export async function generatePPTX(
   for (const data of slides) {
     if (data.type === 'definitions') {
       await addDefinitionsSlide(pptx, data.mode, data.subtitle, templateLayout);
-    } else if (data.type === 'pit-viewer' || data.type === 'summary-viewer') {
+    } else if (data.type === 'pit-report') {
+      await addPitReportSlide(pptx, data, templateLayout, templateTheme);
+    } else if (data.type === 'summary-viewer') {
       addViewerSlide(pptx, data, templateLayout, templateTheme);
-    } else if (data.type === 'pit-section') {
-      addCrossSectionSlide(pptx, data, templateLayout);
     } else {
       await addWaterfallSlide(pptx, data, templateLayout);
     }
