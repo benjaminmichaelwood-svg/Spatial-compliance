@@ -17,7 +17,7 @@ import { MeshBVH } from 'three-mesh-bvh';
 import { SURFACE_ROLES } from '../../types';
 import type { FlatDomainSolid } from '../../workers/engineClient';
 import { sampleHeatmapRamp } from '../ThicknessLegend';
-import { decimateGeometry } from '../../utils/decimation';
+import { decimateGeometry, unweldWithFlatNormals } from '../../utils/decimation';
 import { buildCreaseGeometry } from './geometryHelpers';
 import type { DomainGroupProps, SelectionInfo, SurfaceMeshProps } from './types';
 
@@ -193,7 +193,7 @@ export const SurfaceMesh = memo(function SurfaceMesh({ upload, style, selected, 
   const matRef = useRef<THREE.MeshPhongMaterial>(null);
 
   const { geometry, lodGeometries, triCount } = useMemo(() => {
-    const build = (positions: Float32Array, indices: Uint32Array) => {
+    const buildSmooth = (positions: Float32Array, indices: Uint32Array) => {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
       geo.setIndex(new THREE.BufferAttribute(indices, 1));
@@ -202,14 +202,29 @@ export const SurfaceMesh = memo(function SurfaceMesh({ upload, style, selected, 
       (geo as any).boundsTree = new MeshBVH(geo);
       return geo;
     };
+    // Decimated (LOD 1/2) levels use flat, per-face normals instead of
+    // shared/averaged ones — see unweldWithFlatNormals's own comment for
+    // why: vertex clustering can fold a thin feature enough that shared
+    // vertex normals cancel to near-zero (renders black), which flat
+    // per-face normals can't do.
+    const buildFlat = (positions: Float32Array, indices: Uint32Array) => {
+      const unwelded = unweldWithFlatNormals(positions, indices);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(unwelded.positions, 3));
+      geo.setAttribute('normal', new THREE.BufferAttribute(unwelded.normals, 3));
+      geo.setIndex(new THREE.BufferAttribute(unwelded.indices, 1));
+      geo.computeBoundingSphere();
+      (geo as any).boundsTree = new MeshBVH(geo);
+      return geo;
+    };
     // Precompute all LOD levels once here (on data load), not per camera
     // check — decimation itself isn't free. LOD 0 is the same full-res
     // geometry used everywhere else (raycasting, disposal, etc.).
-    const full = build(upload.positions, upload.indices);
+    const full = buildSmooth(upload.positions, upload.indices);
     const levels = LOD_RATIOS.map((ratio) => {
       if (ratio === 1) return full;
       const d = decimateGeometry(upload.positions, upload.indices, ratio);
-      return build(d.positions, d.indices);
+      return buildFlat(d.positions, d.indices);
     });
     return { geometry: full, lodGeometries: levels, triCount: upload.triangleCount };
   }, [upload]);
@@ -380,7 +395,7 @@ export const SurfaceMesh = memo(function SurfaceMesh({ upload, style, selected, 
 });
 
 function buildBatchedGeometry(
-  solids: FlatDomainSolid[],
+  solids: (FlatDomainSolid & { normals?: Float32Array })[],
 ): { geometry: THREE.BufferGeometry; triRanges: { start: number; end: number; solidIdx: number }[]; totalTris: number } {
   let totalVerts = 0;
   let totalIndices = 0;
@@ -391,6 +406,11 @@ function buildBatchedGeometry(
 
   const positions = new Float32Array(totalVerts * 3);
   const indices = new Uint32Array(totalIndices);
+  // Present only when every solid carries precomputed flat normals (the
+  // decimated-LOD path — see unweldWithFlatNormals) — concatenated directly
+  // instead of letting computeVertexNormals() re-derive (and potentially
+  // cancel) them across solid boundaries.
+  const flatNormals = solids.every((s) => s.normals) ? new Float32Array(totalVerts * 3) : null;
   const triRanges: { start: number; end: number; solidIdx: number }[] = [];
 
   let vOffset = 0;
@@ -401,6 +421,7 @@ function buildBatchedGeometry(
     const s = solids[si];
     for (let i = 0; i < s.vertexCount * 3; i++) {
       positions[vOffset * 3 + i] = s.positions[i];
+      if (flatNormals && s.normals) flatNormals[vOffset * 3 + i] = s.normals[i];
     }
     for (let i = 0; i < s.triangleCount * 3; i++) {
       indices[iOffset + i] = s.indices[i] + vOffset;
@@ -418,7 +439,11 @@ function buildBatchedGeometry(
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setIndex(new THREE.BufferAttribute(indices, 1));
-  geo.computeVertexNormals();
+  if (flatNormals) {
+    geo.setAttribute('normal', new THREE.BufferAttribute(flatNormals, 3));
+  } else {
+    geo.computeVertexNormals();
+  }
   geo.computeBoundingSphere();
   (geo as any).boundsTree = new MeshBVH(geo);
   return { geometry: geo, triRanges, totalTris: triOffset };
@@ -449,7 +474,19 @@ export const BatchedDomainGroup = memo(function BatchedDomainGroup({
           ? solids
           : solids.map((s) => {
               const d = decimateGeometry(s.positions, s.indices, ratio);
-              return { ...s, positions: d.positions, indices: d.indices, vertexCount: d.positions.length / 3, triangleCount: d.indices.length / 3 };
+              // Flat per-face normals for decimated levels — see
+              // unweldWithFlatNormals's comment: shared/averaged normals
+              // can cancel to near-zero (black) where clustering folds a
+              // thin wall's opposing faces close together.
+              const unwelded = unweldWithFlatNormals(d.positions, d.indices);
+              return {
+                ...s,
+                positions: unwelded.positions,
+                indices: unwelded.indices,
+                normals: unwelded.normals,
+                vertexCount: unwelded.positions.length / 3,
+                triangleCount: unwelded.indices.length / 3,
+              };
             });
       return buildBatchedGeometry(levelSolids);
     });
